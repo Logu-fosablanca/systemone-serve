@@ -11,13 +11,13 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from clef_engine import RUNTIMES, ClefEngine, ClefRuntime, QueueFull
+from clef_engine import RUNTIMES, ClefEngine, ClefRuntime, KevRuntime, QueueFull
 from config import config
 from engine import get_engine
 from schema import SystemOneRequest, SystemOneResponse, Usage
 
 # Backends served by ClefEngine; anything else falls through to the generic engine.
-SYSTEMONE_BACKENDS = {"clef", *RUNTIMES}
+SYSTEMONE_BACKENDS = {"clef", "kev", *RUNTIMES}
 API_KEY = os.getenv("VLLM_API_KEY", "")
 _bearer = HTTPBearer(auto_error=False)
 _batch_size = Histogram("clef_batch_size", "Records per short-batch forward pass", buckets=(1, 2, 4, 8, 16, 32))
@@ -43,6 +43,14 @@ async def lifespan(app: FastAPI):
                 config.model_path,
                 config.device,
                 max_length=_env_int("PACKAGE_MAX_LENGTH", 1024),
+            )
+        elif config.model_backend == "kev":
+            rt = await asyncio.to_thread(
+                KevRuntime.load,
+                config.model_path,
+                config.device,
+                max_state=int(os.getenv("KEV_MAX_STATE") or 0) or None,
+                max_branch=int(os.getenv("KEV_MAX_BRANCH") or 0) or None,
             )
         else:
             rt = await asyncio.to_thread(

@@ -122,9 +122,52 @@ async def check_packaged() -> int:
     return 0
 
 
+def check_kev(model_id: str, device: str) -> int:
+    """Our batched path vs kev's own per-record forward() on the same encodings.
+
+    Both run kev's model, so a mismatch means our adapter is wrong -- meta ordering,
+    softmax axis, or batch/result zipping -- which is exactly the class of bug that
+    returns plausible numbers instead of raising.
+    """
+    from clef_engine import ClefEngine, KevRuntime
+
+    rt = KevRuntime.load(model_id, device)
+    jobs = [rt.prepare(r) for r in RECORDS]
+    assert not any(job.long for job in jobs), "kev must never take the chunked path"
+    assert all(job.state_end > 0 for job in jobs), [j.state_end for j in jobs]
+
+    ours = rt.run_short(jobs)
+    bad = 0
+    for job, out in zip(jobs, ours):
+        ref_logits = rt.model.forward(job.enc.enc)  # one record at a time
+        ref = rt.api.to_answers([z.float().softmax(-1).tolist() for z in ref_logits], job.enc.meta)
+        bad += compare("kev", out["answers"], ref, 2e-3)
+
+    engine_out = asyncio.run(_kev_engine(rt))
+    # Not bit-exact: the engine runs this record alone, we ran it in a batch of four.
+    bad += compare("kev-engine", engine_out["answers"], ours[0]["answers"], 2e-3)
+    print(f"kev stats: {rt.stats}")
+    print("PASS" if not bad else f"FAIL: {bad} mismatches")
+    return 1 if bad else 0
+
+
+async def _kev_engine(rt) -> dict:
+    engine = ClefEngine(rt)
+    engine.start()
+    outs = await asyncio.gather(*(engine.submit(RECORDS[0]) for _ in range(3)))
+    stats = engine.stats_snapshot()
+    assert stats["merged_duplicates"] == 2, stats
+    return outs[0]
+
+
 def main() -> int:
     if "--packaged" in sys.argv:
         return asyncio.run(check_packaged())
+    if "--kev" in sys.argv:
+        return check_kev(
+            os.getenv("SYSTEMONE_MODEL", "jaredpalmer/kev-0.8b"),
+            os.getenv("SYSTEMONE_DEVICE", "cpu"),
+        )
     tiny = "--tiny" in sys.argv
     settings = {"chunk_tokens": 128, "long_state_tokens": 64}  # force several chunks on the LOG state
     if tiny:
