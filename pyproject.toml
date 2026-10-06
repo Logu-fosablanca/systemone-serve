@@ -5,7 +5,7 @@ requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
-    "torch==2.11.*",
+    "torch>=2.6",
     "transformers>=5.10",
     "accelerate>=0.34.0",
     "pydantic>=2.0.0",
@@ -20,16 +20,26 @@ dependencies = [
 # needs Triton and causal-conv1d compiles a CUDA extension, so neither installs cleanly
 # on Windows. ClefRuntime refuses to start on CUDA without them unless
 # CLEF_ALLOW_SLOW_KERNELS=1. Install with: uv sync --extra clef
-# transformers is pinned exactly here: ClefRuntime resumes DeltaNet caches through
-# internals that are not covered by that package's compatibility promise.
-clef = ["flash-linear-attention", "causal-conv1d", "transformers==5.10.2"]
+# torch and transformers are pinned exactly here, not in base: ClefRuntime resumes
+# DeltaNet caches through internals that are not covered by either package's
+# compatibility promise. Every other backend works across a range.
+clef = ["flash-linear-attention", "causal-conv1d", "transformers==5.10.2", "torch==2.11.*"]
 # Models shipping their own package. Pure PyTorch, so these install anywhere.
 laya = ["laya"]
 strands = ["strands-decider"]
+# MODEL_BACKEND=kev. Not on PyPI, so this installs from git. The marker is required:
+# kev supports only 3.12-3.13, and without it uv rejects the whole project for the
+# 3.10/3.11 range that requires-python still allows for every other backend.
+kev = ["kev @ git+https://github.com/jaredpalmer/kev ; python_version >= '3.12' and python_version < '3.14'"]
 # bench.py only needs an HTTP client; it never imports torch or the engine.
 bench = ["aiohttp"]
 
 [tool.uv]
-# strands-decider requires transformers>=5.15, which Clef's pin excludes. The two cannot
-# share an environment; run them as separate processes behind the vLLM plugin instead.
-conflicts = [[{ extra = "clef" }, { extra = "strands" }]]
+# These vendors pin incompatibly against Clef: strands-decider needs transformers>=5.15,
+# which Clef's pin excludes, and kev needs torch<2.9 against Clef's 2.11. Neither can
+# share an environment with the clef extra; run them as separate processes behind the
+# vLLM plugin, which is what it is for.
+conflicts = [
+    [{ extra = "clef" }, { extra = "strands" }],
+    [{ extra = "clef" }, { extra = "kev" }],
+]
