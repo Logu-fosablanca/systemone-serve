@@ -6,7 +6,7 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
     "torch==2.11.*",
-    "transformers==5.10.2",
+    "transformers>=5.10",
     "accelerate>=0.34.0",
     "pydantic>=2.0.0",
     "huggingface_hub>=0.25.0",
@@ -20,7 +20,14 @@ dependencies = [
 # needs Triton and causal-conv1d compiles a CUDA extension, so neither installs cleanly
 # on Windows. ClefRuntime refuses to start on CUDA without them unless
 # CLEF_ALLOW_SLOW_KERNELS=1. Install with: uv sync --extra clef
-clef = ["flash-linear-attention", "causal-conv1d"]
-# MODEL_BACKEND=encoder — Laya and other BERT-backbone decision models. Pure PyTorch,
-# so this one installs anywhere. Install with: uv sync --extra encoder
-encoder = ["laya"]
+# transformers is pinned exactly here: ClefRuntime resumes DeltaNet caches through
+# internals that are not covered by that package's compatibility promise.
+clef = ["flash-linear-attention", "causal-conv1d", "transformers==5.10.2"]
+# Models shipping their own package. Pure PyTorch, so these install anywhere.
+laya = ["laya"]
+strands = ["strands-decider"]
+
+[tool.uv]
+# strands-decider requires transformers>=5.15, which Clef's pin excludes. The two cannot
+# share an environment; run them as separate processes behind the vLLM plugin instead.
+conflicts = [[{ extra = "clef" }, { extra = "strands" }]]

@@ -12,7 +12,7 @@ class Config:
     # ponytail: semaphore cap; replace with async batching queue if p95 latency matters
     max_concurrent: int = field(default_factory=lambda: int(os.getenv("MAX_CONCURRENT", "4")))
     # "clef": Cloudflare/clef joint-head loader (causal, state cache, chunked prefill)
-    # "encoder": BERT-backbone decision models such as Laya (bidirectional, single pass)
+    # "laya" / "strands": models shipping their own package — see clef_engine.packaged.RUNTIMES
     # "generic": AutoModelForCausalLM with prompt scoring — an approximation, no trained head
     model_backend: str = field(default_factory=lambda: os.getenv("MODEL_BACKEND", "generic"))
     # Tokens the model uses for noul yes/no; override if your tokenizer splits these differently

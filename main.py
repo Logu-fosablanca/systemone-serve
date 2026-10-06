@@ -11,11 +11,13 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from clef_engine import ClefEngine, ClefRuntime, EncoderRuntime, QueueFull
+from clef_engine import RUNTIMES, ClefEngine, ClefRuntime, QueueFull
 from config import config
 from engine import get_engine
 from schema import SystemOneRequest, SystemOneResponse, Usage
 
+# Backends served by ClefEngine; anything else falls through to the generic engine.
+SYSTEMONE_BACKENDS = {"clef", *RUNTIMES}
 API_KEY = os.getenv("VLLM_API_KEY", "")
 _bearer = HTTPBearer(auto_error=False)
 _batch_size = Histogram("clef_batch_size", "Records per short-batch forward pass", buckets=(1, 2, 4, 8, 16, 32))
@@ -34,13 +36,13 @@ async def require_key(creds: HTTPAuthorizationCredentials | None = Depends(_bear
 async def lifespan(app: FastAPI):
     if not API_KEY:
         raise RuntimeError("VLLM_API_KEY must be set; refusing to serve unauthenticated")
-    if config.model_backend in ("clef", "encoder"):
-        if config.model_backend == "encoder":
+    if config.model_backend in SYSTEMONE_BACKENDS:
+        if config.model_backend in RUNTIMES:
             rt = await asyncio.to_thread(
-                EncoderRuntime.load,
+                RUNTIMES[config.model_backend].load,
                 config.model_path,
                 config.device,
-                max_length=_env_int("ENCODER_MAX_LENGTH", 1024),
+                max_length=_env_int("PACKAGE_MAX_LENGTH", 1024),
             )
         else:
             rt = await asyncio.to_thread(
@@ -84,7 +86,7 @@ async def systemone(req: SystemOneRequest):
         if q.type == "choice" and not (1 <= len(q.criteria) <= 255):
             raise HTTPException(400, f"question '{qid}': choice needs 1-255 options")
 
-    if config.model_backend in ("clef", "encoder"):
+    if config.model_backend in SYSTEMONE_BACKENDS:
         request = {
             "state": req.state,
             "questions": {qid: q.model_dump(exclude_none=True) for qid, q in req.questions.items()},

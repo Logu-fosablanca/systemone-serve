@@ -87,24 +87,25 @@ async def check_engine(rt: ClefRuntime, ref: dict, tol: float) -> int:
     return sum(compare("engine", out["answers"], ref, tol) for out in outs)
 
 
-class FakeEncoderAgent:
-    """Stands in for laya.load(...) so the encoder path is testable without the package."""
+class FakePackagedRuntime:
+    """Stands in for a vendor package so the packaged path is testable without installing one."""
 
     def __init__(self) -> None:
         self.calls = 0
 
-    def predict(self, state, questions, max_len=1024):
+    def _call(self, state, questions):
         self.calls += 1
         return {"answers": {qid: {"type": "noul", "noul": 0.5} for qid in questions}}
 
 
-async def check_encoder() -> int:
-    from clef_engine import EncoderRuntime
+async def check_packaged() -> int:
+    from clef_engine import PackageRuntime
 
-    agent = FakeEncoderAgent()
-    rt = EncoderRuntime(agent, max_length=256)
+    rt = PackageRuntime(agent=None, max_length=256)
+    agent = FakePackagedRuntime()
+    rt._call = agent._call  # the one method every vendor subclass overrides
     job = rt.prepare(RECORDS[0])
-    assert not job.long, "encoder records must never take the chunked path"
+    assert not job.long, "packaged records must never take the chunked path"
     assert job.cost > 0 and rt.states is None, (job.cost, rt.states)
 
     engine = ClefEngine(rt)
@@ -117,13 +118,13 @@ async def check_encoder() -> int:
     assert agent.calls == 1, agent.calls
     assert stats["merged_duplicates"] == 2 and stats["answer_cache_hits"] == 1, stats
     assert all(o["answers"].keys() == RECORDS[1]["questions"].keys() for o in outs)
-    print(f"encoder      shared scheduler ok  predict_calls={agent.calls}  stats={stats}")
+    print(f"packaged     shared scheduler ok  model_calls={agent.calls}  stats={stats}")
     return 0
 
 
 def main() -> int:
-    if "--encoder" in sys.argv:
-        return asyncio.run(check_encoder())
+    if "--packaged" in sys.argv:
+        return asyncio.run(check_packaged())
     tiny = "--tiny" in sys.argv
     settings = {"chunk_tokens": 128, "long_state_tokens": 64}  # force several chunks on the LOG state
     if tiny:
