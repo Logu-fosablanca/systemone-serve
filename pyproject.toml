@@ -13,22 +13,14 @@ dependencies = [
     "pillow>=10.0.0",
     "prometheus-client>=0.20.0",
     "prometheus-fastapi-instrumentator>=7.0.0",
-    # DeltaNet fast kernels — server refuses to start on CUDA without these
-    "flash-linear-attention",
-    "causal-conv1d",
 ]
 
 [project.optional-dependencies]
-# MODEL_BACKEND=encoder (Laya and other BERT-backbone decision models)
+# MODEL_BACKEND=clef — DeltaNet fast kernels. Linux + CUDA only: flash-linear-attention
+# needs Triton and causal-conv1d compiles a CUDA extension, so neither installs cleanly
+# on Windows. ClefRuntime refuses to start on CUDA without them unless
+# CLEF_ALLOW_SLOW_KERNELS=1. Install with: uv sync --extra clef
+clef = ["flash-linear-attention", "causal-conv1d"]
+# MODEL_BACKEND=encoder — Laya and other BERT-backbone decision models. Pure PyTorch,
+# so this one installs anywhere. Install with: uv sync --extra encoder
 encoder = ["laya"]
-
-# Pull the CUDA 12.4 torch wheel so uv doesn't install the CPU-only PyPI build
-[tool.uv.sources]
-torch = [
-    { index = "torch-cuda", marker = "sys_platform == 'linux'" },
-]
-
-[[tool.uv.index]]
-name = "torch-cuda"
-url = "https://download.pytorch.org/whl/cu124"
-explicit = true
