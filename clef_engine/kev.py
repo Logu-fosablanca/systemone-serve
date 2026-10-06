@@ -44,6 +44,7 @@ class KevRuntime:
         model: Any,
         api: Any,
         encode: Any,
+        overflow: type[Exception] = ValueError,
         *,
         max_state: int | None = None,
         max_branch: int | None = None,
@@ -52,6 +53,7 @@ class KevRuntime:
         self.model = model
         self.api = api
         self.encode = encode
+        self.overflow = overflow
         self.max_state = max_state
         self.max_branch = max_branch
         self.states = None  # see module docstring: no cross-request reuse yet
@@ -62,7 +64,7 @@ class KevRuntime:
         try:
             from kev import api
             from kev.checkpoint import load as load_checkpoint
-            from kev.model import encode
+            from kev.model import ContextOverflow, encode
         except ModuleNotFoundError as exc:
             # Only claim kev is missing when it actually is. Anything else -- a blocked or
             # broken native extension in its dependency tree -- must surface its own error
@@ -76,7 +78,7 @@ class KevRuntime:
         tokenizer, model = load_checkpoint(model_id, device)
         temperature = getattr(getattr(model, "head", None), "temperature", None)
         log.info("kev loaded %s on %s (head temperature: %s)", model_id, device, temperature)
-        return cls(tokenizer, model, api, encode, **kwargs)
+        return cls(tokenizer, model, api, encode, ContextOverflow, **kwargs)
 
     def _encode(self, request: dict[str, Any]) -> Encoded:
         req = self.api.SystemOneRequest(
@@ -84,7 +86,13 @@ class KevRuntime:
         )
         record, meta = self.api.to_record(req)
         limits = {k: v for k, v in (("max_state", self.max_state), ("max_branch", self.max_branch)) if v}
-        return Encoded(self.encode(self.tokenizer, record, strict=True, **limits), meta)
+        try:
+            # strict=True on purpose: silently truncating a state would answer confidently
+            # about input the model never saw. Too long is the caller's problem to fix.
+            enc = self.encode(self.tokenizer, record, strict=True, **limits)
+        except self.overflow as exc:
+            raise ValueError(f"input too long for this model: {exc}") from exc
+        return Encoded(enc, meta)
 
     def prepare(self, request: dict[str, Any]) -> Job:
         """Tokenize on the CPU; safe to call off the GPU thread."""

@@ -131,10 +131,20 @@ def check_kev(model_id: str, device: str) -> int:
     """
     from clef_engine import ClefEngine, KevRuntime
 
-    rt = KevRuntime.load(model_id, device)
+    # kev's own default max_state is 384; the log record below is ~950 tokens.
+    rt = KevRuntime.load(model_id, device, max_state=2048)
     jobs = [rt.prepare(r) for r in RECORDS]
     assert not any(job.long for job in jobs), "kev must never take the chunked path"
     assert all(job.state_end > 0 for job in jobs), [j.state_end for j in jobs]
+
+    # An oversized state must be a client error, not a 500: main.py maps ValueError to 400.
+    tight = KevRuntime(rt.tokenizer, rt.model, rt.api, rt.encode, rt.overflow, max_state=16)
+    try:
+        tight.prepare(RECORDS[2])
+    except ValueError as exc:
+        print(f"kev          overflow rejected cleanly: {str(exc)[:70]}")
+    else:
+        raise AssertionError("oversized state was accepted instead of rejected")
 
     ours = rt.run_short(jobs)
     bad = 0
