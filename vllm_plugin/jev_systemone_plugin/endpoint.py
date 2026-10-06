@@ -39,6 +39,8 @@ class JevSystemOnePlugin:
 
     async def init_state(self, engine_client: Any, state: Any, args: Namespace) -> None:
         state.systemone_url = os.getenv("CLEF_ENGINE_URL", "http://127.0.0.1:8001").rstrip("/") + "/v1/systemone"
+        # 30s, not minutes: a hung engine otherwise pins a vLLM connection far longer than
+        # any real decision takes, and the engine sheds load with 429 rather than queueing.
         state.systemone_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=float(os.getenv("CLEF_PROXY_TIMEOUT_S", "300")))
+            timeout=aiohttp.ClientTimeout(total=float(os.getenv("CLEF_PROXY_TIMEOUT_S", "30")))
         )

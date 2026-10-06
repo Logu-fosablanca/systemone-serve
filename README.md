@@ -93,7 +93,7 @@ All settings are environment variables.
 | Variable | Default | What it does |
 |---|---|---|
 | `VLLM_API_KEY` | *required* | Bearer token clients must send. The same key vLLM uses. |
-| `MODEL_BACKEND` | `generic` | `clef` for Clef. `generic` is the older engine for jev-style decoder models. |
+| `MODEL_BACKEND` | `clef` | `clef` for Cloudflare Clef. `kev` for Kev. `laya`/`strands` for vendor-packaged models. `generic` is prompt-scoring on a plain causal LM — an approximation with no trained head. |
 | `MODEL_PATH` | | Hugging Face id or local folder, e.g. `Cloudflare/clef-flash` |
 | `CLEF_REVISION` | latest | Model repo commit to pin. Clef-flash today: `17f0b0ad64efb65d273590632833508766b2aae6` |
 | `DEVICE` | `cuda` | Where the model runs |
@@ -120,7 +120,7 @@ VLLM_PLUGINS=jev_systemone CLEF_ENGINE_URL=http://127.0.0.1:8001 vllm serve <you
 | Variable | Default | What it does |
 |---|---|---|
 | `CLEF_ENGINE_URL` | `http://127.0.0.1:8001` | Where the plugin forwards requests |
-| `CLEF_PROXY_TIMEOUT_S` | `300` | How long the plugin waits for the engine |
+| `CLEF_PROXY_TIMEOUT_S` | `30` | How long the plugin waits for the engine |
 
 ## Project layout
 

@@ -28,7 +28,7 @@ class Engine:
         self.tokenizer = AutoTokenizer.from_pretrained(config.model_path)
         model = AutoModelForCausalLM.from_pretrained(
             config.model_path,
-            torch_dtype=_DTYPES[config.dtype],
+            dtype=_DTYPES[config.dtype],
             device_map=config.device,
         )
         model.eval()

@@ -14,7 +14,7 @@ class Config:
     # "clef": Cloudflare/clef joint-head loader (causal, state cache, chunked prefill)
     # "laya" / "strands": models shipping their own package — see clef_engine.packaged.RUNTIMES
     # "generic": AutoModelForCausalLM with prompt scoring — an approximation, no trained head
-    model_backend: str = field(default_factory=lambda: os.getenv("MODEL_BACKEND", "generic"))
+    model_backend: str = field(default_factory=lambda: os.getenv("MODEL_BACKEND", "clef"))
     # Tokens the model uses for noul yes/no; override if your tokenizer splits these differently
     noul_yes_token: str = field(default_factory=lambda: os.getenv("NOUL_YES_TOKEN", "yes"))
     noul_no_token: str = field(default_factory=lambda: os.getenv("NOUL_NO_TOKEN", "no"))

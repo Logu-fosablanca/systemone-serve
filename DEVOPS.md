@@ -47,42 +47,50 @@ nvidia-smi
 
 ### Option A — vLLM plugin (recommended if you already run vLLM)
 
-Installs `/v1/systemone` directly into your existing vLLM server.
-Same port, same `VLLM_API_KEY`, same TLS — nothing changes for your existing clients.
+Adds `/v1/systemone` to your existing vLLM server on its own port, under the same
+`VLLM_API_KEY` and TLS. Nothing changes for your existing clients.
+
+The plugin is a **proxy, not a model host**: no model is loaded inside vLLM's process.
+It forwards `/v1/systemone` to the engine, which runs as a second process. You need both.
 
 ```bash
-git clone <your-repo-url> /opt/jev-inference
-cd /opt/jev-inference
+git clone <your-repo-url> /opt/systemone-serve
+cd /opt/systemone-serve
 
-# Install the plugin into the same venv that runs vLLM
+# 1. Start the engine (owns the GPU and the model)
+uv sync --extra clef
+export VLLM_API_KEY=$(openssl rand -hex 32)
+MODEL_BACKEND=clef MODEL_PATH=Cloudflare/clef-flash PORT=8001 \
+  uv run python main.py &
+
+# 2. Install the plugin into the venv that runs vLLM
 pip install ./vllm_plugin
 
-# Launch vLLM with the plugin enabled
+# 3. Start vLLM with the plugin enabled, pointed at the engine
 VLLM_PLUGINS=jev_systemone \
-SYSTEMONE_MODEL=Cloudflare/clef-flash \
-SYSTEMONE_DEVICE=cuda \
-SYSTEMONE_MAX_CONCURRENT=4 \
-vllm serve <your-llm-model> --host 0.0.0.0 --port 8000
+CLEF_ENGINE_URL=http://127.0.0.1:8001 \
+VLLM_API_KEY=$VLLM_API_KEY \
+vllm serve <your-llm-model> --host 0.0.0.0 --port 8000 --api-key $VLLM_API_KEY
 ```
 
 Your vLLM server now exposes both:
 - `POST /v1/chat/completions` — handled by vLLM (your existing LLM)
-- `POST /v1/systemone` — handled by the plugin (Clef joint head)
-- `GET /v1/systemone/health` — Clef health check
+- `POST /v1/systemone` — proxied to the engine, which runs Clef's joint head
+
+`VLLM_PLUGINS` takes the **entry point name** (`jev_systemone`), and vLLM loads no
+endpoint plugins unless it is set. The caller's `Authorization` header is forwarded
+unchanged, so both processes must share one `VLLM_API_KEY`.
+
+Engine health is on the engine's own port, not vLLM's: `GET http://127.0.0.1:8001/health`.
+A load balancer probing only vLLM's `/health` will not notice the engine being down.
 
 ### Option B — Standalone server (no vLLM dependency)
 
 ```bash
-git clone <your-repo-url> /opt/jev-inference
-cd /opt/jev-inference
+git clone <your-repo-url> /opt/systemone-serve
+cd /opt/systemone-serve
 
-python3.11 -m venv .venv
-source .venv/bin/activate
-
-pip install -r requirements.txt
-
-# Extra dep for Clef's joint head
-pip install huggingface_hub pillow
+uv sync --extra clef   # Linux + CUDA: builds the DeltaNet kernels
 ```
 
 ---

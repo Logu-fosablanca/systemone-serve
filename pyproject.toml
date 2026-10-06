@@ -26,6 +26,8 @@ clef = ["flash-linear-attention", "causal-conv1d", "transformers==5.10.2"]
 # Models shipping their own package. Pure PyTorch, so these install anywhere.
 laya = ["laya"]
 strands = ["strands-decider"]
+# bench.py only needs an HTTP client; it never imports torch or the engine.
+bench = ["aiohttp"]
 
 [tool.uv]
 # strands-decider requires transformers>=5.15, which Clef's pin excludes. The two cannot
