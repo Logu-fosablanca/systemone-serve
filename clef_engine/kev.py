@@ -63,7 +63,12 @@ class KevRuntime:
             from kev import api
             from kev.checkpoint import load as load_checkpoint
             from kev.model import encode
-        except ImportError as exc:
+        except ModuleNotFoundError as exc:
+            # Only claim kev is missing when it actually is. Anything else -- a blocked or
+            # broken native extension in its dependency tree -- must surface its own error
+            # rather than be reported as an install problem.
+            if (exc.name or "").partition(".")[0] != "kev":
+                raise
             raise RuntimeError(
                 "kev backend needs the kev package, which is not on PyPI: "
                 "uv add git+https://github.com/jaredpalmer/kev"
