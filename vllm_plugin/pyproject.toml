@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jev-systemone-plugin"
+version = "0.2.0"
+description = "vLLM endpoint plugin — forwards POST /v1/systemone to the Clef engine behind vLLM's API key"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "aiohttp",
+]
+
+[project.entry-points."vllm.endpoint_plugins"]
+jev_systemone = "jev_systemone_plugin:JevSystemOnePlugin"
