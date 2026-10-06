@@ -130,4 +130,7 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host=config.host, port=config.port, reload=False)
+    # The app object, not "main:app": an import string makes uvicorn import this module a
+    # second time (it is already __main__), re-running module-level code and tripping
+    # prometheus' DuplicateTimeseries on the histogram below.
+    uvicorn.run(app, host=config.host, port=config.port)
