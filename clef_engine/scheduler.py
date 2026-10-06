@@ -76,7 +76,7 @@ class ClefEngine:
             "queued_tokens": self._queued,
             "short_queue": len(self._short),
             "long_queue": len(self._long),
-            "state_cache_bytes": self.rt.states.used,
+            "state_cache_bytes": self.rt.states.used if self.rt.states else 0,
         }
 
     async def submit(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -139,9 +139,11 @@ class ClefEngine:
 
     async def _step_short(self) -> None:
         batch = [self._short.popleft()]
-        longest = len(batch[0].enc.input_ids)
+        # For a short job cost is its token count, so this is unchanged for the decoder
+        # path and lets encoder runtimes size batches without exposing token ids.
+        longest = batch[0].cost
         while self._short and len(batch) < self.max_batch:
-            next_longest = max(longest, len(self._short[0].enc.input_ids))
+            next_longest = max(longest, self._short[0].cost)
             if next_longest * (len(batch) + 1) > self.batch_tokens:
                 break
             longest = next_longest

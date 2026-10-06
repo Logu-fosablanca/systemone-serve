@@ -87,7 +87,43 @@ async def check_engine(rt: ClefRuntime, ref: dict, tol: float) -> int:
     return sum(compare("engine", out["answers"], ref, tol) for out in outs)
 
 
+class FakeEncoderAgent:
+    """Stands in for laya.load(...) so the encoder path is testable without the package."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def predict(self, state, questions, max_len=1024):
+        self.calls += 1
+        return {"answers": {qid: {"type": "noul", "noul": 0.5} for qid in questions}}
+
+
+async def check_encoder() -> int:
+    from clef_engine import EncoderRuntime
+
+    agent = FakeEncoderAgent()
+    rt = EncoderRuntime(agent, max_length=256)
+    job = rt.prepare(RECORDS[0])
+    assert not job.long, "encoder records must never take the chunked path"
+    assert job.cost > 0 and rt.states is None, (job.cost, rt.states)
+
+    engine = ClefEngine(rt)
+    engine.start()
+    outs = await asyncio.gather(*(engine.submit(RECORDS[1]) for _ in range(3)))
+    outs.append(await engine.submit(RECORDS[1]))
+    stats = engine.stats_snapshot()
+    # Four identical requests: three merged in flight, one served from the answer cache,
+    # so the model must have been called exactly once.
+    assert agent.calls == 1, agent.calls
+    assert stats["merged_duplicates"] == 2 and stats["answer_cache_hits"] == 1, stats
+    assert all(o["answers"].keys() == RECORDS[1]["questions"].keys() for o in outs)
+    print(f"encoder      shared scheduler ok  predict_calls={agent.calls}  stats={stats}")
+    return 0
+
+
 def main() -> int:
+    if "--encoder" in sys.argv:
+        return asyncio.run(check_encoder())
     tiny = "--tiny" in sys.argv
     settings = {"chunk_tokens": 128, "long_state_tokens": 64}  # force several chunks on the LOG state
     if tiny:

@@ -11,7 +11,9 @@ class Config:
     dtype: str = field(default_factory=lambda: os.getenv("DTYPE", "bfloat16"))
     # ponytail: semaphore cap; replace with async batching queue if p95 latency matters
     max_concurrent: int = field(default_factory=lambda: int(os.getenv("MAX_CONCURRENT", "4")))
-    # "clef" uses Cloudflare/clef joint-head loader; "generic" uses AutoModelForCausalLM
+    # "clef": Cloudflare/clef joint-head loader (causal, state cache, chunked prefill)
+    # "encoder": BERT-backbone decision models such as Laya (bidirectional, single pass)
+    # "generic": AutoModelForCausalLM with prompt scoring — an approximation, no trained head
     model_backend: str = field(default_factory=lambda: os.getenv("MODEL_BACKEND", "generic"))
     # Tokens the model uses for noul yes/no; override if your tokenizer splits these differently
     noul_yes_token: str = field(default_factory=lambda: os.getenv("NOUL_YES_TOKEN", "yes"))

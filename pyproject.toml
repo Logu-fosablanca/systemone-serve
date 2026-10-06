@@ -18,6 +18,10 @@ dependencies = [
     "causal-conv1d",
 ]
 
+[project.optional-dependencies]
+# MODEL_BACKEND=encoder (Laya and other BERT-backbone decision models)
+encoder = ["laya"]
+
 # Pull the CUDA 12.4 torch wheel so uv doesn't install the CPU-only PyPI build
 [tool.uv.sources]
 torch = [

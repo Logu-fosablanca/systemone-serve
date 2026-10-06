@@ -11,7 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from prometheus_client import Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from clef_engine import ClefEngine, ClefRuntime, QueueFull
+from clef_engine import ClefEngine, ClefRuntime, EncoderRuntime, QueueFull
 from config import config
 from engine import get_engine
 from schema import SystemOneRequest, SystemOneResponse, Usage
@@ -34,16 +34,24 @@ async def require_key(creds: HTTPAuthorizationCredentials | None = Depends(_bear
 async def lifespan(app: FastAPI):
     if not API_KEY:
         raise RuntimeError("VLLM_API_KEY must be set; refusing to serve unauthenticated")
-    if config.model_backend == "clef":
-        rt = await asyncio.to_thread(
-            ClefRuntime.load,
-            config.model_path,
-            config.device,
-            revision=os.getenv("CLEF_REVISION") or None,
-            chunk_tokens=_env_int("CLEF_CHUNK_TOKENS", 2048),
-            long_state_tokens=_env_int("CLEF_LONG_STATE_TOKENS", 1024),
-            state_cache_bytes=int(float(os.getenv("CLEF_STATE_CACHE_GB", "16")) * 2**30),
-        )
+    if config.model_backend in ("clef", "encoder"):
+        if config.model_backend == "encoder":
+            rt = await asyncio.to_thread(
+                EncoderRuntime.load,
+                config.model_path,
+                config.device,
+                max_length=_env_int("ENCODER_MAX_LENGTH", 1024),
+            )
+        else:
+            rt = await asyncio.to_thread(
+                ClefRuntime.load,
+                config.model_path,
+                config.device,
+                revision=os.getenv("CLEF_REVISION") or None,
+                chunk_tokens=_env_int("CLEF_CHUNK_TOKENS", 2048),
+                long_state_tokens=_env_int("CLEF_LONG_STATE_TOKENS", 1024),
+                state_cache_bytes=int(float(os.getenv("CLEF_STATE_CACHE_GB", "16")) * 2**30),
+            )
         await asyncio.to_thread(rt.warmup)
         app.state.clef = ClefEngine(
             rt,
@@ -76,7 +84,7 @@ async def systemone(req: SystemOneRequest):
         if q.type == "choice" and not (1 <= len(q.criteria) <= 255):
             raise HTTPException(400, f"question '{qid}': choice needs 1-255 options")
 
-    if config.model_backend == "clef":
+    if config.model_backend in ("clef", "encoder"):
         request = {
             "state": req.state,
             "questions": {qid: q.model_dump(exclude_none=True) for qid, q in req.questions.items()},
