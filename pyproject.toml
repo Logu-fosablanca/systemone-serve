@@ -1,0 +1,30 @@
+[project]
+name = "systemone-serve"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "torch==2.11.*",
+    "transformers==5.10.2",
+    "accelerate>=0.34.0",
+    "pydantic>=2.0.0",
+    "huggingface_hub>=0.25.0",
+    "pillow>=10.0.0",
+    "prometheus-client>=0.20.0",
+    "prometheus-fastapi-instrumentator>=7.0.0",
+    # DeltaNet fast kernels — server refuses to start on CUDA without these
+    "flash-linear-attention",
+    "causal-conv1d",
+]
+
+# Pull the CUDA 12.4 torch wheel so uv doesn't install the CPU-only PyPI build
+[tool.uv.sources]
+torch = [
+    { index = "torch-cuda", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "torch-cuda"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true

@@ -38,7 +38,7 @@ Send a state (text or JSON) and a set of typed questions. Get back a probability
 Clef-flash needs about 19 GB of GPU memory for its weights. Leave room for activations and for saved states (16 GB by default).
 
 ```bash
-pip install -r requirements.txt     # causal-conv1d may need the CUDA toolkit to build
+uv sync                             # causal-conv1d may need the CUDA toolkit to build
 python smoke_test.py                # real weights vs Cloudflare's reference: run this first
 
 export VLLM_API_KEY=$(openssl rand -hex 32)
