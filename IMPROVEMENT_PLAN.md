@@ -6,6 +6,25 @@
 
 ---
 
+## Implementation status (updated 2026-10-07)
+
+| # | Improvement | Status | Env var | Needs EC2 |
+|---|---|---|---|---|
+| 1 | Fused DeltaNet kernels | Ready — `pip install` on EC2 | `CLEF_ALLOW_SLOW_KERNELS` | Yes (Linux + CUDA) |
+| 2 | FP8 quantization | **Coded** — `_apply_fp8()` in runtime.py | `CLEF_FP8=1` | Yes (H100 FP8 cores) |
+| 3 | torch.compile | **Coded** — in `warmup()` | `CLEF_COMPILE=1` | Yes (compilation) |
+| 4 | Packed batching | **Coded** — `_run_short_packed()`, gated on fused kernels | `CLEF_PACKED=1` | Yes (needs fla) |
+| 5 | Head vectorization | Deferred — profile first | — | Yes (profiling) |
+| 6 | Async encoding pool | **Coded** — 4 threads | — | No |
+
+All coded improvements pass smoke tests (`--tiny`, `--packaged`, `--kev`).
+Packed batching is gated: only activates when `flash-linear-attention` is installed
+(the reference DeltaNet path doesn't reset recurrent state at cu_seqlens boundaries).
+
+**Next step:** install fla + causal-conv1d on EC2 H100, run benchmarks.
+
+---
+
 ## Current state
 
 | | vllm-jev (A800) | Us (RTX 3050, Kev only) | Gap |
@@ -25,7 +44,7 @@ compound on top.
 
 ---
 
-## Improvement 1: Fused DeltaNet kernels
+## Improvement 1: Fused DeltaNet kernels — READY (install only)
 
 ### What
 
@@ -61,9 +80,9 @@ uv add "flash-linear-attention[cuda,conv1d]"
 The `[cuda]` extra pulls the correct torch/triton wheels. The `[conv1d]` extra installs
 causal-conv1d for the fast 1D convolution path.
 
-**Verification:** our existing `_check_kernels()` in `runtime.py:96-107` already checks
-`modeling_qwen3_5.is_fast_path_available` and refuses to start on CUDA without it (unless
-`CLEF_ALLOW_SLOW_KERNELS=1`). No code changes needed — just install the packages.
+**Verification:** `_has_fused_kernels()` in `runtime.py` tries `import fla` and gates
+both `_check_kernels()` (refuses CUDA start without it, unless `CLEF_ALLOW_SLOW_KERNELS=1`)
+and packed batching. No further code changes needed — just install the packages on EC2.
 
 For Kev: `kev`'s `LoadOptions.from_env()` already respects `KEV_FUSED=1` when
 flash-linear-attention is present. Same install, same benefit.
@@ -96,7 +115,7 @@ already has. If they don't install cleanly, we fall back to the current path (wh
 
 ---
 
-## Improvement 2: FP8 quantization
+## Improvement 2: FP8 quantization — IMPLEMENTED (c0765c3)
 
 ### What
 
@@ -189,7 +208,7 @@ the fallback.
 
 ---
 
-## Improvement 3: torch.compile
+## Improvement 3: torch.compile — IMPLEMENTED (c0765c3)
 
 ### What
 
@@ -261,7 +280,7 @@ prevent full fusion — fixable by marking those points with `torch._dynamo.allo
 
 ---
 
-## Improvement 4: Packed batching (cu_seqlens)
+## Improvement 4: Packed batching (cu_seqlens) — IMPLEMENTED (c0765c3)
 
 ### What
 
@@ -400,7 +419,7 @@ Profiling data from H100. Don't build this speculatively.
 
 ---
 
-## Improvement 6: Async encoding pipeline
+## Improvement 6: Async encoding pipeline — IMPLEMENTED (c0765c3)
 
 ### What
 
