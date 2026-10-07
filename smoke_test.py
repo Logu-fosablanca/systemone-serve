@@ -123,11 +123,14 @@ async def check_packaged() -> int:
 
 
 def check_kev(model_id: str, device: str) -> int:
-    """Our batched path vs kev's own per-record forward() on the same encodings.
+    """probs_and_prefix path vs kev's own forward() on the same encodings.
 
     Both run kev's model, so a mismatch means our adapter is wrong -- meta ordering,
-    softmax axis, or batch/result zipping -- which is exactly the class of bug that
-    returns plausible numbers instead of raising.
+    softmax axis, or result zipping -- which is exactly the class of bug that returns
+    plausible numbers instead of raising.
+
+    Also tests the prefix cache: RECORDS[2] and RECORDS[3] share the same state (LOG),
+    so the second one should get a cache hit and produce the same state-level answer.
     """
     from clef_engine import ClefEngine, KevRuntime
 
@@ -146,22 +149,38 @@ def check_kev(model_id: str, device: str) -> int:
     else:
         raise AssertionError("oversized state was accepted instead of rejected")
 
-    # bf16 keeps ~8 mantissa bits, so a probability near 0.9 carries ~0.003 of absolute
-    # precision and differs by 1-2 ulp between a batch of four and a batch of one purely
-    # from reassociation. 2e-3 only holds in fp32. compare() checks the chosen option
-    # exactly either way, so a flipped decision still fails however loose this is -- and a
-    # real adapter bug lands orders of magnitude off, not in the third decimal.
+    # bf16 keeps ~8 mantissa bits; both paths agree to fp32 rounding (kev #77).
+    # compare() checks the chosen option exactly, so a flipped decision fails regardless.
     tol = 2e-3 if os.getenv("KEV_DTYPE", "fp32") == "fp32" else 1.5e-2
 
     ours = rt.run_short(jobs)
     bad = 0
     for job, out in zip(jobs, ours):
-        ref_logits = rt.model.forward(job.enc.enc)  # one record at a time
+        # Reference: kev's own per-record forward() + softmax (agrees with probs_and_prefix
+        # to fp32 rounding; kev documents and tests this as #77).
+        ref_logits = rt.model.forward(job.enc.enc)
         ref = rt.api.to_answers([z.float().softmax(-1).tolist() for z in ref_logits], job.enc.meta)
         bad += compare("kev", out["answers"], ref, tol)
 
+    # --- prefix cache: same state, different questions ---
+    # Enable a small cache (64 MB) and run RECORDS[2] and [3] which share state=LOG.
+    # [2] is a cache miss (prefix stored), [3] is a cache hit (prefix reused).
+    rt_cached = KevRuntime.load(model_id, device, max_state=2048,
+                                prefix_cache_bytes=64 * 2**20)
+    cached_jobs = [rt_cached.prepare(r) for r in RECORDS[2:4]]
+    cached_outs = rt_cached.run_short(cached_jobs)
+    # Both answers should match what we got without the cache.
+    for job, cached_out, no_cache_out in zip(cached_jobs, cached_outs, ours[2:4]):
+        bad += compare("kev-cached", cached_out["answers"], no_cache_out["answers"], tol)
+    assert rt_cached.stats["prefix_hits"] == 1, rt_cached.stats
+    assert rt_cached.states is not None and rt_cached.states.used > 0
+    print(f"kev prefix cache: hits={rt_cached.stats['prefix_hits']} "
+          f"misses={rt_cached.stats['prefix_misses']} "
+          f"bytes={rt_cached.states.used:,}")
+
     engine_out = asyncio.run(_kev_engine(rt))
-    # Not bit-exact: the engine runs this record alone, we ran it in a batch of four.
+    # Engine runs RECORDS[0] alone; our loop above also ran it alone (no batch-level
+    # softmax reassociation since probs_and_prefix handles each record separately).
     bad += compare("kev-engine", engine_out["answers"], ours[0]["answers"], tol)
     print(f"kev stats: {rt.stats}")
     print("PASS" if not bad else f"FAIL: {bad} mismatches")

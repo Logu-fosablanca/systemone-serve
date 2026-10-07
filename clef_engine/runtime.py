@@ -133,6 +133,8 @@ class ClefRuntime:
         self.states = StateCache(state_cache_bytes)
         self.stats = {"state_hits": 0, "state_misses": 0, "state_tokens_reused": 0}
         self.prefix_len = self._prefix_len()
+        self._startup_cache: Any = None      # precomputed after warmup()
+        self._startup_hidden: Any = None     # [prefix_len, d_model] fp32
 
     @classmethod
     def load(cls, model_id: str, device: str = "cuda", revision: str | None = None, **kwargs: Any) -> ClefRuntime:
@@ -145,6 +147,24 @@ class ClefRuntime:
         model, processor = jsm.load_release_model(path, device=device, **({"attn_implementation": attn} if attn else {}))
         log.info("Clef loaded from %s (attention override: %s)", path, attn or "none")
         return cls(model, processor, jsm, **kwargs)
+
+    def _compute_startup_prefix(self) -> None:
+        """Run the fixed system-prompt tokens once and cache the result.
+
+        Every long request now starts here instead of from scratch. The state still
+        covers tokens [prefix_len, state_end), so the saved hidden states and K/V cache
+        from this call prepend correctly when computing or loading a state.
+
+        DeltaNet layers mutate their cache in place, so long_step() copies this before
+        resuming -- same rule as StateCache. warmup() resets states but keeps this intact.
+        """
+        questions = {"q": {"type": "noul", "instructions": "x"}}
+        enc = self.jsm.encode_record(self.tokenizer, {"state": "a", "questions": questions})
+        prefix_ids = tuple(enc.input_ids[:self.prefix_len])
+        hidden, cache = self._prefill(prefix_ids, None)
+        self._startup_cache = cache
+        self._startup_hidden = hidden  # [prefix_len, d_model]
+        log.info("startup prefix precomputed: %d tokens", self.prefix_len)
 
     def _prefix_len(self) -> int:
         # Two records that differ only in their state diverge where the state starts.
@@ -167,6 +187,9 @@ class ClefRuntime:
 
     @torch.inference_mode()
     def run_short(self, jobs: list[Job]) -> list[dict[str, Any]]:
+        # ponytail: collate_records pads every record to the same length; switch to
+        # packed batching (cu_seqlens) to eliminate padding waste when records differ
+        # greatly in length. Needs Clef weights to verify parity; see SYSTEMONE_PERF_PLAN.md Phase 4.
         batch = self.jsm.collate_records([job.enc for job in jobs], self.tokenizer.pad_token_id, self.device)
         return [self._result(job, logits) for job, logits in zip(jobs, self.model(batch))]
 
@@ -182,6 +205,13 @@ class ClefRuntime:
                 self.stats["state_tokens_reused"] += job.state_end
             else:
                 self.stats["state_misses"] += 1
+                # Reuse the precomputed startup prefix so every long request avoids
+                # recomputing the fixed system-prompt tokens. The startup hidden states
+                # are prepended to the accumulated state hidden states below.
+                if self._startup_cache is not None:
+                    job.cache = copy.deepcopy(self._startup_cache)
+                    job.hidden = [self._startup_hidden]
+                    job.pos = self.prefix_len
         if job.pos < job.state_end:
             end = min(job.pos + self.chunk_tokens, job.state_end)
             hidden, job.cache = self._prefill(ids[job.pos : end], job.cache)
@@ -217,11 +247,13 @@ class ClefRuntime:
 
     def warmup(self) -> None:
         """Run both paths once so kernels compile before the first real request."""
+        self._compute_startup_prefix()
         questions = {"q": {"type": "noul", "instructions": "warmup"}}
         self.run_short([self.prepare({"state": "warmup", "questions": questions})])
         job = self.prepare({"state": "warmup " * 64, "questions": questions})
         job.long = True
         while self.long_step(job) is None:
             pass
+        # Clear warmup entries from the state cache but keep the startup prefix.
         self.states = StateCache(self.states.budget)
         self.stats = dict.fromkeys(self.stats, 0)

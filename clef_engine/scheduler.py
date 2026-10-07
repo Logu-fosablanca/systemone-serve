@@ -14,7 +14,7 @@ import hashlib
 import json
 import logging
 import time
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
@@ -54,7 +54,7 @@ class ClefEngine:
         self.answer_cache_size = answer_cache_size
         self.on_batch = on_batch
         self.stats = {"answer_cache_hits": 0, "merged_duplicates": 0, "rejected": 0}
-        self._short: deque[Job] = deque()
+        self._short: list[Job] = []
         self._long: list[Job] = []
         self._queued = 0
         self._answers: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -138,16 +138,23 @@ class ClefEngine:
                 log.exception("scheduler step failed")
 
     async def _step_short(self) -> None:
-        batch = [self._short.popleft()]
+        # Length-group: sort largest-cost-first so pop() from the end takes the smallest,
+        # grouping similar lengths to cut padding waste. O(k log k), k = queue length,
+        # bounded by admission control. FIFO order is not preserved, but all short jobs
+        # are cheap and the admission control prevents unbounded waiting.
+        # ponytail: sorts the whole list; a priority-queue insert would be O(log k) per
+        # enqueue but k is small in practice and a heap complicates the dedup logic.
+        self._short.sort(key=lambda j: j.cost, reverse=True)
         # For a short job cost is its token count, so this is unchanged for the decoder
         # path and lets encoder runtimes size batches without exposing token ids.
+        batch = [self._short.pop()]  # smallest cost (list is largest-first)
         longest = batch[0].cost
         while self._short and len(batch) < self.max_batch:
-            next_longest = max(longest, self._short[0].cost)
+            next_longest = max(longest, self._short[-1].cost)  # peek at next smallest
             if next_longest * (len(batch) + 1) > self.batch_tokens:
                 break
             longest = next_longest
-            batch.append(self._short.popleft())
+            batch.append(self._short.pop())
         if self.on_batch:
             self.on_batch(len(batch))
         loop = asyncio.get_running_loop()

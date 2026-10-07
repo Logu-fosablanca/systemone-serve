@@ -28,8 +28,9 @@ Send a state (text or JSON) and a set of typed questions. Get back a probability
 | | |
 |---|---|
 | **Short states** | Batched through Cloudflare's own forward pass. Batches are sized by exact token counts and start as soon as the GPU is free. |
-| **Long states** | Computed in chunks and saved, so the same state with new questions only computes the questions. |
+| **Long states** | Computed in chunks from the precomputed startup prefix, then saved. The same state with new questions only computes the new questions. |
 | **Repeat requests** | Exact repeats come from an answer cache. Identical requests that arrive together run once. |
+| **Kev state cache** | Same-state/different-question requests reuse the cached state prefix. Enable with `KEV_PREFIX_CACHE_GB`. |
 | **Scheduling** | Short batches and long chunks take turns. When too much work is queued, new requests get HTTP 429. |
 | **Safety** | API-key auth with `VLLM_API_KEY`. Refuses to start on the slow kernel fallback. |
 | **Observability** | Counters at `/health`, Prometheus metrics at `/metrics`. |
@@ -108,6 +109,7 @@ All settings are environment variables.
 | `CLEF_ANSWER_CACHE_SIZE` | `10000` | Answers remembered for exact repeats |
 | `CLEF_ATTN_IMPL` | transformers default | Override the attention kernel, e.g. `flash_attention_2` |
 | `CLEF_ALLOW_SLOW_KERNELS` | unset | Set to `1` to run without the fast DeltaNet kernels |
+| `KEV_PREFIX_CACHE_GB` | `0` (off) | GPU memory for cached Kev state prefixes. `0.5` fits ~130 short states (150 tok) or ~2 long states (950 tok) on a 4 GB card. Uses VRAM, so set conservatively. |
 
 ## Serving through vLLM's port
 
@@ -334,9 +336,8 @@ python bench.py --url http://127.0.0.1:8001 --key local --model kev-0.8b --concu
 
 ## Not in it yet
 
-- FP8 weights and batches without padding (speed work).
-- CUDA graphs. Measured harmful on a 4 GB card, and unreachable from the current Kev path — see [BENCHMARKS.md](BENCHMARKS.md#cuda-graphs-a-negative-result).
-- Cross-request state reuse on the `kev` backend. Kev exposes the API for it (`probs_with_prefix`); this runtime still recomputes the state once per question.
+- FP8 weights, CUDA graphs (measured harmful on 4 GB — see [BENCHMARKS.md](BENCHMARKS.md#cuda-graphs-a-negative-result)), fused kernels.
+- Packed/unpadded batching (`cu_seqlens`). The seam is marked in `runtime.py:run_short`; needs Clef weights to verify parity.
 - Images and video. Clef supports them; this API accepts only text and JSON.
 - Partial reuse when a transcript grows. Today only exact state matches are reused.
 - A head-to-head against vllm-jev. `bench.py` drives both; it needs a Linux box.

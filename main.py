@@ -51,6 +51,7 @@ async def lifespan(app: FastAPI):
                 config.device,
                 max_state=int(os.getenv("KEV_MAX_STATE") or 0) or None,
                 max_branch=int(os.getenv("KEV_MAX_BRANCH") or 0) or None,
+                prefix_cache_bytes=int(float(os.getenv("KEV_PREFIX_CACHE_GB", "0")) * 2**30),
             )
         else:
             rt = await asyncio.to_thread(

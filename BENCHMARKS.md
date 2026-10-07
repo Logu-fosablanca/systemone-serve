@@ -206,5 +206,12 @@ flattering direction.
 - **Any datacentre GPU.** Every number above is a 4 GB laptop card, which is also what makes
   the CUDA-graphs result a memory-pressure finding rather than a general one.
 - **vllm-jev head-to-head.** Needs Linux; a free Colab T4 is the cheapest path.
-- **The state cache**, on any backend. `state_cache_bytes` was 0 for every run here.
+- **The prefix cache** with a real repeat-rate sweep. The cache is implemented and verified
+  correct (same answers, `hits=1 misses=1` on the smoke test), but not yet swept under load.
+  The previous repeat-rate sweep used the answer cache; the prefix cache is additive on top
+  and should help on same-state/different-question traffic.
+- **The new Kev path** (probs_and_prefix). The numbers in the sections above were measured with
+  `forward_batch`, which recomputes the state per question. After the switch, re-run with
+  `--repeat-rate 0,0.5,0.9` to measure the real prefix-cache gain separately from the
+  answer-cache gain.
 - **Images and video.** Clef supports them; this API is text and JSON only.

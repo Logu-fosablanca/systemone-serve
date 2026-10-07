@@ -1,31 +1,29 @@
 """Runtime for jaredpalmer/kev-* decision models (Qwen3.5 backbone, LoRA, pointer head).
 
-Kev ships readable code, so this uses its own encode(), forward_batch(), to_record() and
-to_answers() rather than reimplementing any of them. That matters: encode() packs a state
-prefix followed by one branch per question, and for a hybrid backbone forward_batch()
-routes to a row-based pass where each branch reads the state's cache independently. A flat
-causal pass over the packed sequence would instead let question 2 attend to question 1 and
-return confidently wrong probabilities with no error raised.
+Kev ships readable code, so this uses its own encode(), probs_and_prefix() and
+probs_with_prefix() rather than reimplementing any of them. That matters for two reasons:
 
-Batching is real here, not a loop: forward_batch() takes a list of encodings.
+1. encode() packs a state prefix followed by one branch per question, and for a hybrid
+   backbone (Kev-0.8B, Kev-27B) the backbone runs in row form where each branch reads
+   the state's cache independently. A flat causal pass would let question 2 attend to
+   question 1 and return confidently wrong probabilities with no error raised.
 
-This path is the slow one, and knowingly so for now. Two measured reasons to move off it:
+2. probs_and_prefix(enc) runs the state ONCE and returns both the answer probabilities
+   and a reusable state prefix. forward_batch() runs the state per question instead:
+   kev's own figure is 1011 -> 413 ms for 5 questions on Kev-0.8B bf16. probs_and_prefix
+   is the right call regardless of whether there is a cache.
 
-1. forward_batch re-runs the state once per question. kev's own probs() docstring says so,
-   and prefix_min_tokens puts a number on it: Kev-0.8B bf16, 5 questions, 1011 -> 413 ms.
-2. kev's SCORING_INTERFACE exposes probs_and_prefix(enc), probs_with_prefix(enc, prefix)
-   and probs_batch(encs, prefixes, keep) -- a cached state prefix goes in, a new one comes
-   back out. That is a cross-request state cache as a first-class, documented API, and
-   prepare() already computes the state_key it would be stored under.
+probs_with_prefix(enc, prefix) skips the state pass entirely for a cached state.
+_rows_hidden() (called internally) creates a replica of the cache before each branch pass,
+so the stored prefix is never modified -- no deep copy needed on reads.
 
-So the seam this file originally claimed did not exist does exist.
+Cross-request state cache lives in KevPrefixStore (byte-bounded LRU). Enable with
+KEV_PREFIX_CACHE_GB (default 0 = off; the state prefix is on GPU so it eats VRAM).
 
-Switching would also make KEV_CUDA_GRAPHS mean something. model.graphs is read only inside
-probs_batch (kev/model.py:468-485); forward_batch (:389) never touches it, so on this path
-graphs are pure cost: KEV_CUDA_GRAPHS=1 spends ~800 MiB on buffers that cannot be replayed
-once, which on a 4 GB card takes VRAM to 96% and collapses throughput under concurrency
-(10.9 -> 0.9 req/s at 8 concurrent on an RTX 3050). Harmless at 1 concurrent, where nothing
-competes for the allocator. Numbers and the rest of the measurements: BENCHMARKS.md.
+KEV_CUDA_GRAPHS=1: model.graphs is only read inside probs_batch; probs_and_prefix and
+probs_with_prefix never touch it. On this path graphs are pure cost: on a 4 GB card
+~800 MiB of buffers collapse throughput 12-17x under concurrency. Leave it off unless
+the card has room AND the runtime is migrated to probs_batch. See BENCHMARKS.md.
 """
 
 from __future__ import annotations
@@ -33,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from array import array
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -41,6 +40,60 @@ import torch
 from .runtime import Job
 
 log = logging.getLogger("clef.kev")
+
+
+def _prefix_nbytes(prefix: Any) -> int:
+    """Bytes used by a kev state prefix.
+
+    cache.layers has two layer types:
+      LinearAttentionLayer  (DeltaNet): .conv_states, .recurrent_states
+      DynamicLayer          (full attn): .keys, .values
+    h_state is None for hybrid backbones (Kev-0.8B, Kev-27B).
+    """
+    _, cache, h_state = prefix
+    tensors: list[Any] = []
+    for layer in cache.layers:
+        tensors += [getattr(layer, name, None) for name in ("keys", "values", "conv_states", "recurrent_states")]
+    if h_state is not None:
+        tensors.append(h_state)
+    return sum(t.numel() * t.element_size() for t in tensors if isinstance(t, torch.Tensor))
+
+
+class KevPrefixStore:
+    """LRU cache of kev state prefixes (Ls, cache, h_state), bounded by bytes.
+
+    probs_with_prefix() creates an internal replica of the cache, so the stored prefix
+    is never modified between calls -- no deep copy needed on reads or writes.
+    """
+
+    def __init__(self, budget_bytes: int) -> None:
+        self.budget = budget_bytes
+        self.used = 0
+        self._items: OrderedDict[str, tuple[Any, int]] = OrderedDict()  # key -> (prefix, nbytes)
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: str) -> Any | None:
+        pair = self._items.get(key)
+        if pair is not None:
+            self._items.move_to_end(key)
+            self.hits += 1
+            return pair[0]
+        self.misses += 1
+        return None
+
+    def put(self, key: str, prefix: Any) -> None:
+        if key in self._items:
+            self._items.move_to_end(key)
+            return
+        nbytes = _prefix_nbytes(prefix)
+        if nbytes > self.budget:
+            return
+        while self.used + nbytes > self.budget:
+            _, (_, evicted) = self._items.popitem(last=False)
+            self.used -= evicted
+        self._items[key] = (prefix, nbytes)
+        self.used += nbytes
 
 
 @dataclass
@@ -60,6 +113,7 @@ class KevRuntime:
         *,
         max_state: int | None = None,
         max_branch: int | None = None,
+        prefix_cache_bytes: int = 0,
     ) -> None:
         self.tokenizer = tokenizer
         self.model = model
@@ -68,8 +122,10 @@ class KevRuntime:
         self.overflow = overflow
         self.max_state = max_state
         self.max_branch = max_branch
-        self.states = None  # see module docstring: no cross-request reuse yet
-        self.stats = {"records": 0, "state_tokens_seen": 0, "truncated_states": 0}
+        # states exposed so scheduler.stats_snapshot() can report state_cache_bytes.
+        self.states = KevPrefixStore(prefix_cache_bytes) if prefix_cache_bytes > 0 else None
+        self.stats = {"records": 0, "state_tokens_seen": 0, "truncated_states": 0,
+                      "prefix_hits": 0, "prefix_misses": 0}
 
     @classmethod
     def load(cls, model_id: str, device: str = "cuda", **kwargs: Any) -> "KevRuntime":
@@ -122,29 +178,42 @@ class KevRuntime:
         state_end = enc["state_tokens"]
         if enc.get("state_truncated"):
             self.stats["truncated_states"] += 1
-        # Recorded for a future state cache even though nothing reads it yet, so the
-        # key is defined by the same bytes the backbone actually sees.
         state_key = hashlib.sha256(array("q", enc["ids"][:state_end]).tobytes()).hexdigest()
         return Job(
             request=request,
             enc=encoded,
             state_end=state_end,
             state_key=state_key,
-            long=False,  # forward_batch owns the backbone pass; no chunked path
+            long=False,
             cost=len(enc["ids"]),
         )
 
     @torch.inference_mode()
     def run_short(self, jobs: list[Job]) -> list[dict[str, Any]]:
-        batch = self.model.forward_batch([job.enc.enc for job in jobs])
-        return [self._result(job, logits) for job, logits in zip(jobs, batch)]
+        results = []
+        for job in jobs:
+            prefix = self.states.get(job.state_key) if self.states else None
+            if prefix is not None:
+                # State already computed: only the branches run.
+                probs = self.model.probs_with_prefix(job.enc.enc, prefix)
+                self.stats["prefix_hits"] += 1
+            else:
+                # Full pass; returns both answers and the state prefix in one forward.
+                probs, new_prefix = self.model.probs_and_prefix(job.enc.enc)
+                self.stats["prefix_misses"] += 1
+                if self.states is not None:
+                    self.states.put(job.state_key, new_prefix)
+            results.append(self._result(job, probs))
+        return results
 
-    def _result(self, job: Job, logits: list[torch.Tensor]) -> dict[str, Any]:
-        probs = [z.float().softmax(-1).tolist() for z in logits]
+    def _result(self, job: Job, probs: list[torch.Tensor]) -> dict[str, Any]:
+        # probs_and_prefix and probs_with_prefix already return softmax'd probabilities;
+        # .float().tolist() is all that's needed, not .softmax(-1).
+        probs_list = [z.float().tolist() for z in probs]
         self.stats["records"] += 1
         self.stats["state_tokens_seen"] += job.state_end
         return {
-            "answers": self.api.to_answers(probs, job.enc.meta),
+            "answers": self.api.to_answers(probs_list, job.enc.meta),
             "usage": {"input_tokens": job.cost, "output_tokens": 0},
         }
 
@@ -157,3 +226,6 @@ class KevRuntime:
             "questions": {"q": {"type": "noul", "instructions": "warmup"}},
         })])
         self.stats = dict.fromkeys(self.stats, 0)
+        if self.states is not None:
+            # Clear warmup entries so they don't pollute production cache metrics.
+            self.states = KevPrefixStore(self.states.budget)
