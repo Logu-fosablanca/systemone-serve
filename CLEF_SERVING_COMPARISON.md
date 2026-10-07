@@ -4,6 +4,15 @@
 **Purpose:** identify concrete improvements for our decisions API speed by comparing every
 known Clef serving implementation against our engine.
 
+> **Provenance.** Every figure for a third-party implementation is quoted from that project's
+> own README, pull request, release notes, or model card — linked in the table below and under
+> [Sources](#sources). None of it was independently measured or reproduced here. The only rows
+> measured on our own hardware are the Kev 0.8B numbers, and those are a different model on a
+> different GPU class, included for calibration only.
+>
+> Architectural claims about how each project handles the joint schema head are read from
+> published code and project descriptions, not from profiling their runtime.
+
 ---
 
 ## Implementations surveyed
@@ -23,8 +32,8 @@ known Clef serving implementation against our engine.
 
 ## Published numbers
 
-All numbers below are what each project reports. Hardware differs, so raw comparison
-across rows is misleading — the takeaway column says what matters.
+All numbers below are what each project reports, not what we measured. Hardware differs
+across rows, so direct comparison is misleading — the takeaway column says what matters.
 
 ### Clef-Flash 9B
 
