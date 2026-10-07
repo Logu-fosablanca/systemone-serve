@@ -215,31 +215,45 @@ implementation:
 4. **Cost-aware scheduling.** Short requests run first; long inputs are chunked. Every
    other implementation uses FCFS, so under mixed load their short-request p95 suffers.
 
-5. **vLLM independence.** We coexist with any vLLM version via nginx routing. vllm-jev
-   and the kurcontko quantizations each pin a specific vLLM version.
+5. **vLLM independence.** The engine runs as its own process and loads no model inside vLLM,
+   so it is not tied to a vLLM version. An optional plugin forwards `/v1/systemone` from
+   vLLM's port to the engine. vllm-jev and the kurcontko quantizations each pin a specific
+   vLLM version. (No reverse-proxy config ships with this repo; DEVOPS.md recommends putting
+   one in front for TLS.)
 
 ---
 
 ## Concrete improvement roadmap for decisions API speed
 
-In order of expected impact, with estimated gains on H100 for Clef-Flash 9B:
+The gain column below is **estimate only**. Nothing in this table has been measured on Clef,
+on an H100, or against vllm-jev. Figures are order-of-magnitude guesses from each technique's
+general reputation, not from profiling this engine.
 
-| # | Action | Estimated gain | Status | Notes |
+| # | Action | Estimated gain (unvalidated) | Status | Notes |
 |---|---|---|---|---|
-| 1 | Install fused DeltaNet kernels | 3-5x on new requests | **Install step only** | `uv sync --extra clef` on EC2; code already uses them when present |
-| 2 | FP8 weights | 1.5-1.8x throughput | **CODED** (`CLEF_FP8=1`) | Path A (pre-quant checkpoint) and Path B (TorchAO) both handled; silent dequant detected |
-| 3 | CUDA graphs | 10-30% latency | **CODED** (`CLEF_COMPILE=1`) | `torch.compile(mode="reduce-overhead")` handles CUDA graphs internally; warmup runs both short and long paths |
-| 4 | Packed batching | 10-30% throughput | **CODED** (`CLEF_PACKED=1`) | Tested on random model; parity on real Clef 27B still needs the EC2 run |
-| 5 | Head vectorization | 5-15% if head > 10% of latency | **DEFERRED** | Only worth doing after profiling shows head dominates; not coded |
-| 6 | State cache | 0-90 ms/request on repeated states | **BUILT** | LRU byte-bounded cache; deepcopy on resume; exposed in `/health` with budget |
-| 7 | Startup prefix | ~100 tokens saved per long request | **BUILT** | Precomputed once at warmup; every long request starts from it |
+| 1 | Install fused DeltaNet kernels | large; the PyTorch fallback is ~20 kernel launches per layer vs 1 | **Install step only** | `uv sync --extra clef`; the code already uses them when present and refuses to start without them unless `CLEF_ALLOW_SLOW_KERNELS=1` |
+| 2 | FP8 weights | halves weight bytes; throughput effect unmeasured | **CODED** (`CLEF_FP8=1`) | Path A (pre-quantized checkpoint) and Path B (TorchAO) both handled; silent dequant detected. Needs SM89+ to execute |
+| 3 | torch.compile (includes CUDA graphs) | unknown on Clef | **CODED** (`CLEF_COMPILE=1`) | `mode="reduce-overhead"` enables CUDAGraph trees. Standalone CUDA graphs measured **12-17x worse** under concurrency on a 4 GB card — see [BENCHMARKS.md](BENCHMARKS.md#cuda-graphs-a-negative-result). Whether compile helps on an 80 GB card is untested |
+| 4 | Packed batching | removes padding waste; size of effect unmeasured | **CODED** (`CLEF_PACKED=1`) | Parity verified on a small random model only. Gated behind `fla` because the fallback DeltaNet path does not reset recurrent state at `cu_seqlens` boundaries |
+| 5 | Head vectorization | unknown; depends on head share of latency | **NOT CODED** | Deferred until profiling shows the head dominates |
+| 6 | State cache | unknown | **BUILT** | LRU byte-bounded, deepcopy on resume, budget and hit counts in `/health`. Never yet engaged in a benchmark run — see below |
+| 7 | Startup prefix | the fixed system-prompt tokens (~36) per long request | **BUILT** | Precomputed once at warmup; every long request resumes from it |
 
-**Items 1-2 close the kernel gap with vllm-jev. Items 3-4 match their throughput
-ceiling. Items 6-7 are where we pull ahead — and no competitor has them.**
+**What is actually established:** items 2, 3, 4, 6 and 7 exist in the code and match
+Cloudflare's reference implementation on a small random model. Item 1 is an install step. That
+is the whole of it. No throughput or latency comparison against any other implementation has
+been run.
 
-The compound effect: on repeated-state traffic (the common case for agent sessions),
-our engine should be 2-5x faster than any vLLM-based Clef server, because we skip
-the work they're forced to redo.
+Items 6 and 7 are the two entries that a vLLM-based server cannot straightforwardly adopt,
+because they depend on retaining final hidden states that a KV-block prefix cache does not
+hold. That is an architectural difference, not a demonstrated win: their value depends on how
+often states actually repeat in production traffic, which has not been measured.
+
+One caution from the only repeat-rate sweep run so far (Kev 0.8B, RTX 3050): the state cache
+never engaged. The generated states were shorter than `CLEF_LONG_STATE_TOKENS`, so every
+request took the short path, and the measured gain came from the answer cache and in-flight
+merging — both of which any server can implement. Check `state_cache_bytes` in `/health`
+before attributing any result to the state cache.
 
 ---
 
