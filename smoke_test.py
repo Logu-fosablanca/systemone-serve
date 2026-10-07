@@ -1,6 +1,6 @@
 """Check the Clef engine against Cloudflare's reference systemone() on the same records.
 
-    python smoke_test.py          # real model (SYSTEMONE_MODEL, default Cloudflare/clef-flash) on the GPU
+    python smoke_test.py          # real model (SYSTEMONE_MODEL, default Cloudflare/clef) on the GPU
     python smoke_test.py --tiny   # small random model on the CPU: checks engine logic, not weights
 
 Covers the batched short path, the chunked long path, a saved state reused with new
@@ -21,7 +21,7 @@ import torch
 from clef_engine import ClefEngine, ClefRuntime
 from clef_engine.runtime import load_reference
 
-MODEL = os.getenv("SYSTEMONE_MODEL", "Cloudflare/clef-flash")
+MODEL = os.getenv("SYSTEMONE_MODEL", "Cloudflare/clef")
 
 DEPT = {
     "type": "choice",

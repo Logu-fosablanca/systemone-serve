@@ -1,7 +1,7 @@
 # Improvement plan: beating vllm-jev on Clef decisions API
 
 **Date:** 2026-10-07
-**Target:** Clef-Flash 9B on our EC2 H100-SXM (80 GB, 3.35 TB/s, 989 BF16 TFLOPS)
+**Target:** Cloudflare Clef 27B on our EC2 H100-SXM (80 GB, 3.35 TB/s, 989 BF16 TFLOPS)
 **Benchmark:** [vllm-jev PR #4](https://github.com/mode-io/vllm-jev/pull/4) on A800-SXM4-80GB
 
 ---
@@ -100,11 +100,11 @@ FlashQLA registers as a backend for flash-linear-attention automatically. No cod
 
 ### Expected gain
 
-| Scenario | Before | After | Speedup |
+| Scenario (27B) | Before | After | Speedup |
 |---|---|---|---|
-| New 300-token request (backbone) | ~30 ms (estimated H100 with ref kernels) | ~8-10 ms | 3-4x |
-| New 4K-token request (backbone) | ~90 ms | ~25-30 ms | 3x |
-| New 16K-token request (backbone) | ~380 ms | ~100-130 ms | 3x |
+| New 300-token request (backbone) | ~90 ms (estimated H100 with ref kernels) | ~25-30 ms | 3-4x |
+| New 4K-token request (backbone) | ~270 ms | ~75-90 ms | 3x |
+| New 16K-token request (backbone) | ~1,100 ms | ~300-400 ms | 3x |
 
 ### Risk
 
@@ -124,10 +124,12 @@ instead of BF16. FP8 (E4M3) weights with per-token dynamic activation scaling.
 
 ### Why
 
-H100 has native FP8 tensor cores. FP8 halves weight memory (19 GB → ~10 GB) and roughly
-doubles matrix multiply throughput.
+H100 has native FP8 tensor cores. For the 27B model FP8 is near-mandatory:
+BF16 weights alone take ~54 GB of the 80 GB H100, leaving only ~26 GB for state
+cache + KV cache. FP8 cuts weights to ~27 GB, freeing ~53 GB — enough for a large
+state cache that is our main advantage over vllm-jev.
 
-Published numbers from kurcontko:
+Published numbers from kurcontko (on the 9B Flash variant):
 - **98.8% top-1 agreement** with BF16 (KL divergence 0.0019 — near-lossless)
 - **3.2x throughput** vs original BF16 transformers code
 - Components preserved in BF16: joint schema head, vision tower, embeddings, norms
@@ -187,10 +189,11 @@ CLEF_FP8=1  # Load FP8 checkpoint; default 0 (BF16)
 
 | Metric | BF16 | FP8 | Improvement |
 |---|---|---|---|
-| Weight memory | ~19 GB | ~10 GB | 47% less VRAM |
+| Weight memory (27B) | ~54 GB | ~27 GB | 50% less VRAM |
+| Free for cache (H100 80GB) | ~26 GB | ~53 GB | 2x cache budget |
 | Matmul throughput | 989 TFLOPS | ~1,979 TFLOPS | ~2x |
 | End-to-end throughput | baseline | +50-80% | 1.5-1.8x |
-| Accuracy | baseline | 98.8% top-1 agreement | Near-lossless |
+| Accuracy (9B reference) | baseline | 98.8% top-1 agreement | Near-lossless |
 
 ### What NOT to do
 
@@ -589,21 +592,23 @@ Week 4: Production
 
 ## Projected final numbers
 
-After all improvements, on H100 for Clef-Flash 9B:
+After all improvements, on H100 for Cloudflare Clef 27B (FP8):
 
-| Scenario | vllm-jev (A800) | Us (H100, projected) | Why |
+| Scenario | vllm-jev (A800, 9B) | Us (H100, 27B FP8, projected) | Why |
 |---|---|---|---|
-| New request, c1 p50 | 44 ms | **30-40 ms** | Fused kernels + FP8 + compile; H100 > A800 |
-| New request, c64 | 37.2 req/s | **35-45 req/s** | Match or beat via FP8 + packing |
-| Same state, new questions, c1 | 44 ms | **7-10 ms** | State cache hit |
-| Same state, new questions, c64 | 37.2 req/s | **60-80 req/s** | Cache hits + merging |
-| 75% repeat traffic, c16 | ~34 req/s | **80-120 req/s** | Cache + merging + scheduling |
-| 16K-token state, 2nd ask | ~1,300 ms | **~8 ms** | State cache saves 16K recompute |
+| New request, c1 p50 | 44 ms | **60-90 ms** | ~3x model, offset by FP8 + H100 > A800 |
+| New request, c64 | 37.2 req/s | **15-25 req/s** | Larger model; FP8 + packing help |
+| Same state, new questions, c1 | 44 ms | **10-15 ms** | State cache hit (questions only) |
+| Same state, new questions, c64 | 37.2 req/s | **40-60 req/s** | Cache hits + merging |
+| 75% repeat traffic, c16 | ~34 req/s | **50-80 req/s** | Cache + merging + scheduling |
+| 16K-token state, 2nd ask | ~1,300 ms | **~12 ms** | State cache saves 16K recompute |
 | Agent session (20 turns) | ~69K tokens total | **~10K tokens** | Resume from previous turn |
 
-**The key insight:** on cold traffic we match vllm-jev. On warm traffic (the common case
-for agent sessions and repeated decisions), we're 2-5x faster because we don't repeat
-work they're forced to repeat.
+**The key insight:** on cold 27B traffic we're slower than vllm-jev's 9B numbers — the
+model is 3x larger. But on warm traffic (the common case for agent sessions and repeated
+decisions), we're 3-5x faster because we don't repeat work they're forced to repeat.
+The state cache advantage grows with model size: saving a 27B recompute is worth 3x
+more than saving a 9B recompute.
 
 ---
 
@@ -613,7 +618,7 @@ work they're forced to repeat.
 |---|---|
 | Custom CUDA kernels | flash-linear-attention + FlashQLA already exist |
 | NVFP4 quantization | H100 has no FP4 tensor cores; Blackwell-only |
-| Tensor parallelism | 9B model fits on one GPU; TP adds communication overhead |
+| Tensor parallelism | 27B fits on one H100 in FP8 (~27 GB); TP adds communication overhead |
 | Replacing our stack with vllm-jev | Pins vLLM version; loses state cache, answer cache, scheduling |
 | Speculative decoding | Clef has no decode step |
 | Request merging (different questions) | Questions attend to each other in backbone + head |
