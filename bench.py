@@ -50,14 +50,15 @@ def build_load(n: int, repeat_rate: float, state_tokens: int, seed: int = 0,
                namespace: int = 0) -> list[dict[str, Any]]:
     """n requests where ~repeat_rate of them reuse an already-seen state.
 
-    namespace shifts the state ids so separate points in a sweep never share a state.
-    Without it the first point warms the server's cache for every later one, and the
-    sweep measures nothing.
+    seed and namespace both partition the state id space, so no two runs share a state.
+    Without that the first run warms the server's cache for every later one and the
+    numbers measure the cache instead of the model -- separate invocations included, which
+    is why seed has to reach the ids and not just the reuse pattern.
     """
     rng = random.Random(seed)
     requests: list[dict[str, Any]] = []
     seen: list[int] = []
-    base = namespace * (n + 1)
+    base = (seed * 1_000 + namespace) * (n + 1)
     for i in range(n):
         if seen and rng.random() < repeat_rate:
             state_id = rng.choice(seen)
@@ -160,6 +161,11 @@ def selftest() -> int:
     a = {r["state"] for r in build_load(40, 0.5, 32, seed=1, namespace=1)}
     b = {r["state"] for r in build_load(40, 0.5, 32, seed=1, namespace=2)}
     assert not (a & b), f"{len(a & b)} states leaked between sweep points"
+
+    # Nor may two seeds, or a second invocation reruns the first one's states straight out
+    # of the server's answer cache and reports the cache's throughput as the model's.
+    c = {r["state"] for r in build_load(40, 0.0, 32, seed=2, namespace=1)}
+    assert not (a & c), f"{len(a & c)} states leaked between seeds"
 
     # make_state is deterministic, so a repeated state_id is byte-identical and cacheable.
     assert make_state(7, 50) == make_state(7, 50)
