@@ -146,16 +146,23 @@ def check_kev(model_id: str, device: str) -> int:
     else:
         raise AssertionError("oversized state was accepted instead of rejected")
 
+    # bf16 keeps ~8 mantissa bits, so a probability near 0.9 carries ~0.003 of absolute
+    # precision and differs by 1-2 ulp between a batch of four and a batch of one purely
+    # from reassociation. 2e-3 only holds in fp32. compare() checks the chosen option
+    # exactly either way, so a flipped decision still fails however loose this is -- and a
+    # real adapter bug lands orders of magnitude off, not in the third decimal.
+    tol = 2e-3 if os.getenv("KEV_DTYPE", "fp32") == "fp32" else 1.5e-2
+
     ours = rt.run_short(jobs)
     bad = 0
     for job, out in zip(jobs, ours):
         ref_logits = rt.model.forward(job.enc.enc)  # one record at a time
         ref = rt.api.to_answers([z.float().softmax(-1).tolist() for z in ref_logits], job.enc.meta)
-        bad += compare("kev", out["answers"], ref, 2e-3)
+        bad += compare("kev", out["answers"], ref, tol)
 
     engine_out = asyncio.run(_kev_engine(rt))
     # Not bit-exact: the engine runs this record alone, we ran it in a batch of four.
-    bad += compare("kev-engine", engine_out["answers"], ours[0]["answers"], 2e-3)
+    bad += compare("kev-engine", engine_out["answers"], ours[0]["answers"], tol)
     print(f"kev stats: {rt.stats}")
     print("PASS" if not bad else f"FAIL: {bad} mismatches")
     return 1 if bad else 0

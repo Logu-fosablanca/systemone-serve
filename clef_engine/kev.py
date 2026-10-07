@@ -9,11 +9,21 @@ return confidently wrong probabilities with no error raised.
 
 Batching is real here, not a loop: forward_batch() takes a list of encodings.
 
-Not yet done: cross-request state reuse. forward_batch() owns the backbone pass, so there
-is no seam to hand it a cache saved from an earlier request. Kev's own shared_prefix.Prefix
-already holds keys/values/conv/recurrent_states functionally rather than in place, which
-makes it a better candidate for persisting than Clef's cache (no deep copy needed), but
-wiring that means driving the row pass ourselves. Measure first.
+This path is the slow one, and knowingly so for now. Two measured reasons to move off it:
+
+1. forward_batch re-runs the state once per question. kev's own probs() docstring says so,
+   and prefix_min_tokens puts a number on it: Kev-0.8B bf16, 5 questions, 1011 -> 413 ms.
+2. kev's SCORING_INTERFACE exposes probs_and_prefix(enc), probs_with_prefix(enc, prefix)
+   and probs_batch(encs, prefixes, keep) -- a cached state prefix goes in, a new one comes
+   back out. That is a cross-request state cache as a first-class, documented API, and
+   prepare() already computes the state_key it would be stored under.
+
+So the seam this file originally claimed did not exist does exist; switching to the prefix
+path should also make KEV_CUDA_GRAPHS useful, since kev wires graphs into probs_batch.
+
+Measured caveat on a 4 GB card: KEV_CUDA_GRAPHS=1 costs ~800 MiB of graph buffers, taking
+VRAM to 96% and collapsing throughput under concurrency (10.9 -> 0.9 req/s at 8 concurrent
+on an RTX 3050). Harmless at 1 concurrent. Leave it off unless the card has room.
 """
 
 from __future__ import annotations
@@ -63,6 +73,7 @@ class KevRuntime:
     def load(cls, model_id: str, device: str = "cuda", **kwargs: Any) -> "KevRuntime":
         try:
             from kev import api
+            from kev.checkpoint import LoadOptions
             from kev.checkpoint import load as load_checkpoint
             from kev.model import ContextOverflow, encode
         except ModuleNotFoundError as exc:
@@ -75,9 +86,17 @@ class KevRuntime:
                 "kev backend needs the kev package, which is not on PyPI: "
                 "uv add git+https://github.com/jaredpalmer/kev"
             ) from exc
-        tokenizer, model = load_checkpoint(model_id, device)
+        # from_env rather than a bare LoadOptions: this is a server entry point, and it
+        # gives operators kev's own documented knobs instead of inventing parallel ones --
+        # KEV_DTYPE, KEV_ATTN, KEV_CUDA_GRAPHS, KEV_FUSED. The default is fp32, which is
+        # the path kev's published numbers use but twice the memory of bf16.
+        opts = LoadOptions.from_env()
+        tokenizer, model = load_checkpoint(model_id, device, opts)
         temperature = getattr(getattr(model, "head", None), "temperature", None)
-        log.info("kev loaded %s on %s (head temperature: %s)", model_id, device, temperature)
+        log.info(
+            "kev loaded %s on %s (dtype: %s, head temperature: %s)",
+            model_id, device, opts.dtype or "fp32 (default)", temperature,
+        )
         return cls(tokenizer, model, api, encode, ContextOverflow, **kwargs)
 
     def _encode(self, request: dict[str, Any]) -> Encoded:
