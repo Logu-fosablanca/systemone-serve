@@ -18,12 +18,14 @@ This path is the slow one, and knowingly so for now. Two measured reasons to mov
    back out. That is a cross-request state cache as a first-class, documented API, and
    prepare() already computes the state_key it would be stored under.
 
-So the seam this file originally claimed did not exist does exist; switching to the prefix
-path should also make KEV_CUDA_GRAPHS useful, since kev wires graphs into probs_batch.
+So the seam this file originally claimed did not exist does exist.
 
-Measured caveat on a 4 GB card: KEV_CUDA_GRAPHS=1 costs ~800 MiB of graph buffers, taking
-VRAM to 96% and collapsing throughput under concurrency (10.9 -> 0.9 req/s at 8 concurrent
-on an RTX 3050). Harmless at 1 concurrent. Leave it off unless the card has room.
+Switching would also make KEV_CUDA_GRAPHS mean something. model.graphs is read only inside
+probs_batch (kev/model.py:468-485); forward_batch (:389) never touches it, so on this path
+graphs are pure cost: KEV_CUDA_GRAPHS=1 spends ~800 MiB on buffers that cannot be replayed
+once, which on a 4 GB card takes VRAM to 96% and collapses throughput under concurrency
+(10.9 -> 0.9 req/s at 8 concurrent on an RTX 3050). Harmless at 1 concurrent, where nothing
+competes for the allocator. Numbers and the rest of the measurements: BENCHMARKS.md.
 """
 
 from __future__ import annotations

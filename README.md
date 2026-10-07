@@ -8,7 +8,7 @@
 
 Send a state (text or JSON) and a set of typed questions. Get back a probability for every allowed answer. Nothing is generated, so each request is one pass through the model plus a small scoring step.
 
-> **Status.** Every engine path matches Cloudflare's reference implementation on a small random model (CPU). It has not yet run on the real Clef weights, and it has not been benchmarked on an H100.
+> **Status.** Every engine path matches Cloudflare's reference implementation on a small random model (CPU). The `kev` backend additionally matches Kev's own forward pass on **real weights**, on CPU fp32 and GPU bf16, and has been benchmarked — see [BENCHMARKS.md](BENCHMARKS.md). Clef itself has not yet run on real weights (needs ~19 GB), nothing has run on an H100, and there is no head-to-head against vllm-jev yet.
 
 ## Contents
 
@@ -19,6 +19,7 @@ Send a state (text or JSON) and a set of typed questions. Get back a probability
 - [Project layout](#project-layout)
 - [How it works](#how-it-works)
 - [Testing](#testing)
+- [Measured performance](#measured-performance)
 - [Not in it yet](#not-in-it-yet)
 - [Further reading](#further-reading)
 
@@ -130,12 +131,16 @@ jev-inference/
 ├── schema.py                 request and response shapes
 ├── config.py                 environment settings
 ├── clef_engine/
-│   ├── runtime.py            GPU work: batches, chunked prefill, saved states
+│   ├── runtime.py            Clef: batches, chunked prefill, saved states
+│   ├── kev.py                Kev: its own encode/forward_batch, no reimplementation
+│   ├── packaged.py           vendor-packaged models (laya, strands): ~10 lines each
 │   └── scheduler.py          queues, caches, merging, admission control
 ├── vllm_plugin/              optional: serve /v1/systemone on vLLM's port
-├── smoke_test.py             checks every path against Cloudflare's reference
+├── smoke_test.py             checks every path against the vendor's own reference
+├── bench.py                  load generator; drives any /v1/systemone server
 ├── engine.py                 older generic engine for jev-style decoder models
 ├── requirements.txt
+├── BENCHMARKS.md             measured numbers, on real weights
 ├── INFERENCE_ENGINE_PLAN.md  research: what a top-tier inference engine needs
 ├── SYSTEMONE_PERF_PLAN.md    plan and decision rules vs vLLM-based Clef
 ├── DEVOPS.md                 older deployment notes, partly out of date
@@ -308,15 +313,37 @@ python smoke_test.py --tiny   # small random model on the CPU; tolerance 0.001
 
 `--tiny` uses a small random model with the real tokenizer. It checks the logic, not the answer quality.
 
+`python smoke_test.py --kev` compares the `kev` backend against Kev's own per-record forward pass on real weights, and needs no Clef download.
+
+## Measured performance
+
+Full tables, hardware and reproduce commands: **[BENCHMARKS.md](BENCHMARKS.md)**. The headline, Kev-0.8B bf16 on an RTX 3050 Laptop:
+
+| | p50 ms | req/s |
+|---|---|---|
+| 1 concurrent | 197 | 5.0 |
+| 16 concurrent | 1116 | 14.0 |
+| 8 concurrent, 75% repeated states | 407 | **19.5** |
+
+Repeated states buy +110% throughput and −51% p50 — today from the answer cache and in-flight merging, not yet from a state cache. The same sweep on CPU is flat: every batching lever here is a GPU lever.
+
+```bash
+python bench.py --selftest                       # run this first: it guards three real bugs
+python bench.py --url http://127.0.0.1:8001 --key local --model kev-0.8b --concurrency 8
+```
+
 ## Not in it yet
 
-- FP8 weights, CUDA graphs, and batches without padding (speed work).
+- FP8 weights and batches without padding (speed work).
+- CUDA graphs. Measured harmful on a 4 GB card, and unreachable from the current Kev path — see [BENCHMARKS.md](BENCHMARKS.md#cuda-graphs-a-negative-result).
+- Cross-request state reuse on the `kev` backend. Kev exposes the API for it (`probs_with_prefix`); this runtime still recomputes the state once per question.
 - Images and video. Clef supports them; this API accepts only text and JSON.
 - Partial reuse when a transcript grows. Today only exact state matches are reused.
-- A benchmark script for comparing against vllm-jev.
+- A head-to-head against vllm-jev. `bench.py` drives both; it needs a Linux box.
 
 ## Further reading
 
+- [BENCHMARKS.md](BENCHMARKS.md): what has actually been measured, on what, and what hasn't
 - [INFERENCE_ENGINE_PLAN.md](INFERENCE_ENGINE_PLAN.md): what a top-tier inference engine is made of, and where vLLM falls short
 - [SYSTEMONE_PERF_PLAN.md](SYSTEMONE_PERF_PLAN.md): the plan and decision rules for beating vLLM-based Clef
 - [Cloudflare: Introducing Clef](https://blog.cloudflare.com/clef-decision-models/)

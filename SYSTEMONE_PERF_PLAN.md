@@ -2,7 +2,9 @@
 
 **Goal:** serve Cloudflare Clef-flash on our H100 faster than the existing vLLM-based System One servers, and prove it with our own measurements before we commit.
 
-**Status (2026-10-06):** nothing here has been measured on our hardware. Numbers marked *est.* come from the cost model in section 4. Every phase ends with a pass/fail gate.
+**Status (2026-10-07):** nothing *about Clef* has been measured on our hardware. Numbers marked *est.* come from the cost model in section 4. Every phase ends with a pass/fail gate.
+
+What has been measured, on a different model and a laptop GPU, is in [BENCHMARKS.md](BENCHMARKS.md): Kev-0.8B bf16 on an RTX 3050. It does not validate any number in this document, but it does validate three of its assumptions — that repeat traffic is the dominant lever (+110% throughput at 75% repeat), that batching gains need the GPU to be bandwidth-bound (on CPU the same sweep is flat), and that in-flight merging is worthless below concurrency 2. It also contradicts nothing here. Phase 0's baseline table is still empty.
 
 ---
 
@@ -172,7 +174,7 @@ Snapshots sit on 64-token block boundaries, found by cumulative hashes of token 
 
 ### Phase 4: Throughput ceiling (only if profiling calls for it, 1-2 weeks)
 - FP8 from a pre-quantized checkpoint ([kurcontko/clef-flash-FP8-Dynamic](https://huggingface.co/kurcontko/clef-flash-FP8-Dynamic)). Check that FP8 matrix multiplies actually run; HF may convert weights back to BF16 on the fly, which gives no speedup. Re-run the parity gate.
-- CUDA graphs for small token counts.
+- CUDA graphs for small token counts. Budget the buffers before enabling: on a 4 GB card they cost ~800 MiB and collapsed throughput 12-17x under concurrency ([BENCHMARKS.md](BENCHMARKS.md#cuda-graphs-a-negative-result)). An H100 has the room; the lesson is that graphs must be measured against the memory left for activations, not assumed free.
 - Packed batches mixing new and resumed sequences. HF's qwen3_5 DeltaNet path already accepts packed sequences (`cu_seqlens`).
 
 ### Phase 5: Production and upstream (≈1 week)
