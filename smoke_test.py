@@ -196,6 +196,24 @@ async def _kev_engine(rt) -> dict:
     return outs[0]
 
 
+def _check_fp8(tiny: bool) -> int:
+    """Compare BF16 reference answers vs TorchAO FP8-quantized answers on the same records."""
+    from clef_engine.runtime import _apply_fp8
+    settings = {"chunk_tokens": 128, "long_state_tokens": 64}
+    if tiny:
+        rt = ClefRuntime(*build_tiny(), **settings)
+    else:
+        rt = ClefRuntime.load(MODEL, os.getenv("SYSTEMONE_DEVICE", "cuda"), **settings)
+    refs = [rt.jsm.systemone(rt.model, rt.processor, {"model": "ref", **r})["answers"] for r in RECORDS[:2]]
+    rt.model = _apply_fp8(rt.model)
+    jobs = [rt.prepare(r) for r in RECORDS[:2]]
+    outs = rt.run_short(jobs)
+    tol = 0.05  # FP8 quantization may shift probabilities vs the BF16 reference
+    bad = sum(compare("fp8", out["answers"], ref, tol) for out, ref in zip(outs, refs))
+    print("PASS" if not bad else f"FAIL: {bad} FP8 mismatches")
+    return 1 if bad else 0
+
+
 def main() -> int:
     if "--packaged" in sys.argv:
         return asyncio.run(check_packaged())
@@ -204,6 +222,8 @@ def main() -> int:
             os.getenv("SYSTEMONE_MODEL", "jaredpalmer/kev-0.8b"),
             os.getenv("SYSTEMONE_DEVICE", "cpu"),
         )
+    if "--fp8" in sys.argv:
+        return _check_fp8("--tiny" in sys.argv)
     tiny = "--tiny" in sys.argv
     settings = {"chunk_tokens": 128, "long_state_tokens": 64}  # force several chunks on the LOG state
     if tiny:

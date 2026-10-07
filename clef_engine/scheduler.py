@@ -32,7 +32,11 @@ class QueueFull(Exception):
 
 def answer_key(request: dict[str, Any]) -> str:
     # Question order changes the model input, so the key keeps the request's order.
-    blob = json.dumps([request["state"], request["questions"]], ensure_ascii=False, separators=(",", ":"))
+    # Dict states are normalized (sort_keys) so {"a":1,"b":2} and {"b":2,"a":1} hit the same entry.
+    state = request["state"]
+    if isinstance(state, dict):
+        state = json.loads(json.dumps(state, sort_keys=True))
+    blob = json.dumps([state, request["questions"]], ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
@@ -77,6 +81,8 @@ class ClefEngine:
             "short_queue": len(self._short),
             "long_queue": len(self._long),
             "state_cache_bytes": self.rt.states.used if self.rt.states else 0,
+            "state_cache_budget_bytes": self.rt.states.budget if self.rt.states else 0,
+            "state_cache_too_large": self.rt.states.too_large if self.rt.states else 0,
         }
 
     async def submit(self, request: dict[str, Any]) -> dict[str, Any]:

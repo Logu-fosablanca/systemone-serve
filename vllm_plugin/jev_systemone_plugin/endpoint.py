@@ -20,6 +20,17 @@ class JevSystemOnePlugin:
     required_tasks = None
 
     def attach_router(self, app: FastAPI) -> None:
+        @app.get("/v1/systemone/health")
+        async def systemone_health(raw_request: Request) -> Response:
+            s = raw_request.app.state
+            health_url = s.systemone_url.replace("/v1/systemone", "/health")
+            try:
+                async with s.systemone_session.get(health_url) as upstream:
+                    return Response(await upstream.read(), status_code=upstream.status, media_type="application/json")
+            except aiohttp.ClientError as exc:
+                return Response(f'{{"detail": "clef engine unreachable: {type(exc).__name__}"}}', status_code=502,
+                                media_type="application/json")
+
         @app.post("/v1/systemone")
         async def systemone(raw_request: Request) -> Response:
             state = raw_request.app.state

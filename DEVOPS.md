@@ -1,137 +1,77 @@
-# DevOps Deployment Guide — jev-inference
+# Deployment guide — jev-inference
 
-Everything you need to get this running on EC2 and keep it there.
-
----
-
-## What this is
-
-A FastAPI inference server for Cloudflare Clef (and any jev-compatible decision model).
-Exposes `POST /v1/systemone` — returns typed decisions (Choice, Score, Noul) with calibrated probabilities.
-No text generation. Single forward pass per question. Sub-100ms target latency.
+FastAPI inference server for Cloudflare Clef and any jev-compatible decision model.
+Exposes `POST /v1/systemone`. No text generation; single forward pass per decision.
 
 ---
 
-## EC2 Instance Requirements
+## EC2 instance requirements
 
-| | Minimum | Recommended |
+| | Clef-Flash 9B | Clef 27B (recommended) |
 |---|---|---|
-| **Instance** | g5.xlarge (A10G 24GB) | g5.2xlarge or p3.2xlarge (V100 16GB) |
+| **Instance** | p3.2xlarge (V100 16GB) | p4d.xlarge / p4de.xlarge (H100 80GB) |
 | **OS** | Ubuntu 22.04 LTS | Ubuntu 22.04 LTS |
-| **VRAM** | 16GB (clef-flash) | 24GB+ (clef full) |
-| **RAM** | 32GB | 64GB |
-| **Storage** | 100GB gp3 | 200GB gp3 |
-| **CUDA** | 12.1+ | 12.4 |
+| **VRAM** | 19 GB BF16 / 10 GB FP8 | 54 GB BF16 / **27 GB FP8** |
+| **RAM** | 32 GB | 64 GB |
+| **Storage** | 100 GB gp3 | 200 GB gp3 |
+| **CUDA** | 12.1+ | 12.4+ |
 
-> Clef full (27B) needs ~48GB VRAM. Use clef-flash (9B) on a single A10G.
+> **27B + FP8 on H100:** weights occupy ~27 GB, leaving ~53 GB for the state cache.
+> The state cache is what beats vllm-jev — FP8 is near-mandatory to make it large enough.
 
 ---
 
-## Step 1 — EC2 Setup (one-time)
+## Step 1 — EC2 setup (one-time)
 
 ```bash
-# CUDA drivers (Ubuntu 22.04)
 sudo apt-get update
 sudo apt-get install -y nvidia-driver-535 nvidia-cuda-toolkit
-
-# Python 3.11
-sudo apt-get install -y python3.11 python3.11-venv python3-pip
-
-# Verify GPU
-nvidia-smi
+nvidia-smi   # verify GPU visible
 ```
 
 ---
 
-## Step 2 — Clone & Install
+## Step 2 — Deploy
 
-### Option A — vLLM plugin (recommended if you already run vLLM)
+### Option A — vLLM plugin (recommended if vLLM is already running)
 
-Adds `/v1/systemone` to your existing vLLM server on its own port, under the same
-`VLLM_API_KEY` and TLS. Nothing changes for your existing clients.
-
-The plugin is a **proxy, not a model host**: no model is loaded inside vLLM's process.
-It forwards `/v1/systemone` to the engine, which runs as a second process. You need both.
+Adds `/v1/systemone` to your vLLM server via a thin proxy. No model is loaded inside
+vLLM's process — the plugin forwards to the engine, which runs as a second process.
 
 ```bash
-git clone <your-repo-url> /opt/systemone-serve
-cd /opt/systemone-serve
+git clone <your-repo-url> /opt/jev-inference
+cd /opt/jev-inference
 
 # 1. Start the engine (owns the GPU and the model)
 uv sync --extra clef
 export VLLM_API_KEY=$(openssl rand -hex 32)
-MODEL_BACKEND=clef MODEL_PATH=Cloudflare/clef-flash PORT=8001 \
+MODEL_BACKEND=clef MODEL_PATH=Cloudflare/clef PORT=8001 \
+  CLEF_FP8=1 CLEF_COMPILE=1 CLEF_PACKED=1 CLEF_STATE_CACHE_GB=40 \
   uv run python main.py &
 
-# 2. Install the plugin into the venv that runs vLLM
+# 2. Install the plugin into vLLM's venv
 pip install ./vllm_plugin
 
-# 3. Start vLLM with the plugin enabled, pointed at the engine
+# 3. Start vLLM with the plugin
 VLLM_PLUGINS=jev_systemone \
 CLEF_ENGINE_URL=http://127.0.0.1:8001 \
 VLLM_API_KEY=$VLLM_API_KEY \
 vllm serve <your-llm-model> --host 0.0.0.0 --port 8000 --api-key $VLLM_API_KEY
 ```
 
-Your vLLM server now exposes both:
-- `POST /v1/chat/completions` — handled by vLLM (your existing LLM)
-- `POST /v1/systemone` — proxied to the engine, which runs Clef's joint head
-
-`VLLM_PLUGINS` takes the **entry point name** (`jev_systemone`), and vLLM loads no
-endpoint plugins unless it is set. The caller's `Authorization` header is forwarded
-unchanged, so both processes must share one `VLLM_API_KEY`.
+`VLLM_PLUGINS` loads the entry point `jev_systemone`. The caller's `Authorization`
+header is forwarded unchanged. Both processes share one `VLLM_API_KEY`.
 
 Engine health is on the engine's own port, not vLLM's: `GET http://127.0.0.1:8001/health`.
-A load balancer probing only vLLM's `/health` will not notice the engine being down.
 
-### Option B — Standalone server (no vLLM dependency)
-
-```bash
-git clone <your-repo-url> /opt/systemone-serve
-cd /opt/systemone-serve
-
-uv sync --extra clef   # Linux + CUDA: builds the DeltaNet kernels
-```
-
----
-
-## Step 3 — Environment Variables
-
-Create `/opt/jev-inference/.env`:
+### Option B — Standalone Docker (recommended for Clef-only deploys)
 
 ```bash
-# Which model to load (HuggingFace repo ID or local path)
-MODEL_PATH=Cloudflare/clef-flash        # use clef-flash for A10G, clef for A100/H100
+git clone <your-repo-url> /opt/jev-inference
+cd /opt/jev-inference
 
-# MUST be "clef" to use Cloudflare's joint decision head
-MODEL_BACKEND=clef
-
-# GPU settings
-DEVICE=cuda
-DTYPE=bfloat16
-
-# Server
-HOST=0.0.0.0
-PORT=8000
-MAX_CONCURRENT=4
-
-# Noul token override (only used for generic backend, not clef)
-NOUL_YES_TOKEN=yes
-NOUL_NO_TOKEN=no
-```
-
-> **If you're NOT using Clef** (e.g. Kev, OpenJev, or your own RLCD model):
-> Set `MODEL_BACKEND=generic` and set `MODEL_PATH` to the HF repo ID.
-
----
-
-## Step 4 — Run with Docker (recommended)
-
-```bash
-# Build
 docker build -t jev-inference .
 
-# Run (Clef)
 docker run -d \
   --gpus all \
   --name jev-inference \
@@ -142,30 +82,93 @@ docker run -d \
   jev-inference
 ```
 
-Check it started:
+---
+
+## Step 3 — Environment variables
+
+Create `/opt/jev-inference/.env`:
+
 ```bash
-docker logs jev-inference -f
+# ── required ─────────────────────────────────────────────────────────────────
+VLLM_API_KEY=<your-secret>           # Bearer token; required, no default
+MODEL_BACKEND=clef                   # clef | kev | laya | strands
+MODEL_PATH=Cloudflare/clef           # HF repo ID or absolute local path
+
+# ── server ───────────────────────────────────────────────────────────────────
+HOST=0.0.0.0
+PORT=8000
+DEVICE=cuda
+
+# ── performance (H100 + 27B defaults) ────────────────────────────────────────
+CLEF_FP8=1                   # load FP8 checkpoint; halves VRAM, enables large cache
+CLEF_COMPILE=1               # torch.compile backbone (1.5-2x on short prefills)
+CLEF_PACKED=1                # packed batching via cu_seqlens (requires fla, installed)
+CLEF_STATE_CACHE_GB=40       # GPU state cache budget; H100+FP8 has ~53 GB free
+CLEF_CHUNK_TOKENS=2048       # max tokens per prefill chunk for long states
+CLEF_LONG_STATE_TOKENS=1024  # states longer than this take the chunked path
+CLEF_BATCH_TOKENS=8192       # token budget per short batch
+CLEF_BATCH_MAX=32            # max records per short batch
+CLEF_MAX_QUEUED_TOKENS=524288
+CLEF_ANSWER_CACHE_SIZE=10000
+
+# ── optional overrides ────────────────────────────────────────────────────────
+# CLEF_REVISION=<git-sha>    pin model snapshot for deterministic cache keys
+# CLEF_ATTN_IMPL=flash_attention_2   override attention backend
+# CLEF_ALLOW_SLOW_KERNELS=0  never set 1 in production (forces PyTorch fallback)
+# SYSTEMONE_MODEL=Cloudflare/clef    model ID used by smoke_test.py
+```
+
+> **Clef-Flash 9B on A10G:** set `MODEL_PATH=Cloudflare/clef-flash`, `CLEF_STATE_CACHE_GB=8`.
+> FP8 is still recommended: use `kurcontko/clef-flash-FP8-Dynamic` as `MODEL_PATH`.
+
+---
+
+## Step 4 — Verify
+
+```bash
+# Check the engine started and fused kernels loaded
 curl http://localhost:8000/health
+
+# Expected: "stats" block with state_cache_bytes > 0 after the first repeated-state request
+# Startup log should show:
+#   "DeltaNet fast kernels available" (or ClefRuntime refuses to start)
+#   "FP8 checkpoint active" or "FP8 dynamic quantization applied"
+#   "startup prefix precomputed: N tokens"
+#   "torch.compile applied to backbone"
+
+# Send a real request
+curl -X POST http://localhost:8000/v1/systemone \
+  -H "Authorization: Bearer $VLLM_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Cloudflare/clef",
+    "state": "My order has not arrived in two weeks and I am very upset.",
+    "questions": {
+      "dept": {
+        "type": "choice",
+        "instructions": "Which department should handle this?",
+        "criteria": {
+          "shipping": "delivery issues",
+          "billing": "payment issues",
+          "returns": "return requests"
+        }
+      },
+      "urgent": {
+        "type": "noul",
+        "instructions": "Does this need urgent human attention?"
+      }
+    }
+  }'
 ```
 
 ---
 
-## Step 5 — Run without Docker (alternative)
-
-```bash
-source /opt/jev-inference/.venv/bin/activate
-cd /opt/jev-inference
-
-set -a && source .env && set +a
-python main.py
-```
-
-To run as a systemd service:
+## Step 5 — Systemd service
 
 ```ini
 # /etc/systemd/system/jev-inference.service
 [Unit]
-Description=jev-inference server
+Description=jev-inference (Clef /v1/systemone)
 After=network.target
 
 [Service]
@@ -184,104 +187,17 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload
 sudo systemctl enable jev-inference
 sudo systemctl start jev-inference
-sudo systemctl status jev-inference
 ```
 
 ---
 
-## Step 6 — Verify it works
+## Production checklist
 
-```bash
-curl -X POST http://localhost:8000/v1/systemone \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Cloudflare/clef-flash",
-    "state": "My order has not arrived in two weeks and I am very upset.",
-    "scoring": "single",
-    "questions": {
-      "dept": {
-        "type": "choice",
-        "instructions": "Which department should handle this?",
-        "criteria": {
-          "shipping": "delivery issues",
-          "billing": "payment issues",
-          "returns": "return requests"
-        }
-      },
-      "urgent": {
-        "type": "noul",
-        "instructions": "Does this need urgent human attention?",
-        "criteria": {"true": "customer is upset", "false": "routine enquiry"}
-      }
-    }
-  }'
-```
-
-Expected response shape:
-```json
-{
-  "model": "clef-flash",
-  "answers": {
-    "dept": {"type": "choice", "choice": "shipping", "confidence": 0.91, "probabilities": {...}},
-    "urgent": {"type": "noul", "noul": 0.87}
-  },
-  "usage": {"input_tokens": 142, "output_tokens": 0}
-}
-```
-
----
-
-## Security checklist before going public
-
-- [ ] Put Nginx or Caddy in front — do not expose FastAPI directly
-- [ ] Add an `Authorization: Bearer <token>` check (see note below)
-- [ ] Open port 443 only in the EC2 security group, not 8000
-- [ ] Enable HTTPS (Certbot / ACM)
-
-Quick bearer token guard (add to `main.py` until a proper auth layer is built):
-```python
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi import Security
-import os
-
-_bearer = HTTPBearer()
-_TOKEN = os.getenv("API_TOKEN", "")
-
-def verify_token(creds: HTTPAuthorizationCredentials = Security(_bearer)):
-    if _TOKEN and creds.credentials != _TOKEN:
-        raise HTTPException(401, "invalid token")
-```
-Then add `verify_token` as a dependency on the `/v1/systemone` route.
-Add `API_TOKEN=<your-secret>` to `.env`.
-
----
-
-## Improvement Roadmap for DevOps
-
-These are the planned improvements from `INFERENCE_ENGINE_PLAN.md`, in priority order.
-Each one is a separate PR — do not bundle them.
-
-### Phase 1 — This week
-| Task | What to do | File |
-|---|---|---|
-| ✅ Clef joint head | Already done — set `MODEL_BACKEND=clef` | `engine.py` |
-| ✅ Single-pass scoring | Already done — `scoring: "single"` in request | `engine.py` |
-| Add bearer token auth | Add `API_TOKEN` env var + dependency on endpoint | `main.py` |
-| Nginx reverse proxy | Put Nginx in front, terminate TLS, forward to 8000 | New `nginx.conf` |
-
-### Phase 2 — Next sprint
-| Task | What to do |
-|---|---|
-| Replace semaphore with async batch queue | Collect requests within a 5ms window, batch forward pass — handles burst traffic without OOMs |
-| INT8 KV cache | Swap `DTYPE=bfloat16` → `DTYPE=int8` for KV cache, 2x concurrent sequences |
-| Prometheus `/metrics` endpoint | Add `prometheus-fastapi-instrumentator` — latency histograms, queue depth, GPU utilization |
-
-### Phase 3 — Following sprint
-| Task | What to do |
-|---|---|
-| Radix-tree prefix caching | Cache state encodings keyed by state hash — massive TTFT win for repeated states (RAG, shared context) |
-| GGUF support via llama.cpp | Add llama-cpp-python backend for quantized models on smaller instances |
-| Chunked prefill | Split long states into chunks to prevent decode starvation |
+- [ ] Put Nginx or Caddy in front (terminate TLS; don't expose FastAPI directly on port 443)
+- [ ] Open only port 443 in the EC2 security group — not 8000
+- [ ] `VLLM_API_KEY` is set (server refuses to start without it)
+- [ ] Verify on first deploy: `curl /health` returns `"status": "ok"` and the startup log shows fused kernels and FP8 active
+- [ ] Point a load balancer health check at `GET /health` on the engine port, not vLLM's port
 
 ---
 
@@ -289,26 +205,28 @@ Each one is a separate PR — do not bundle them.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `CUDA out of memory` on startup | Model too large for instance | Switch to `clef-flash` or upgrade to p3.8xlarge |
-| `ModuleNotFoundError: joint_schema_model` | Clef snapshot not downloaded | Check `MODEL_PATH` is the HF repo ID, not a local path. Run `huggingface-cli download Cloudflare/clef-flash` manually. |
-| 500 on `/v1/systemone` | `MODEL_BACKEND` not set | Confirm `.env` has `MODEL_BACKEND=clef` |
-| Slow first request (30–60s) | `torch.compile` warmup | Expected on first request. Pre-warm by calling `/health` after startup. |
-| OOM after hours of traffic | KV cache fragmentation (generic backend) | Restart container. Phase 2 batch queue reduces frequency. |
+| Startup: `flash-linear-attention and causal-conv1d are not installed` | Wrong `uv sync` — base deps only | `uv sync --extra clef` (or Docker rebuild) |
+| `CUDA out of memory` on startup | BF16 27B needs 54 GB | Set `CLEF_FP8=1` or switch to `clef-flash` |
+| Startup log shows `running in original precision` | torchao not installed | `uv add torchao`, or load a pre-quantized FP8 checkpoint directly |
+| Answers differ from reference on cache hits | DeltaNet conv state divergence | Increase tolerance in parity gate; check `CLEF_REVISION` matches the checkpoint |
+| Long first request (30–120 s) | `torch.compile` warmup traces at startup | Expected. `/health` returns only after warmup completes. |
+| `RuntimeError: VLLM_API_KEY must be set` | No API key in env | Add `VLLM_API_KEY=<secret>` to `.env` |
+| vLLM plugin returns 502 | Engine process not running | Start `main.py` on `PORT=8001` before starting vLLM |
 
 ---
 
 ## Quick reference
 
 ```bash
-# Restart
-docker restart jev-inference
-
-# Logs
+# Docker
 docker logs jev-inference --tail 100 -f
-
-# Health
+docker restart jev-inference
 curl http://localhost:8000/health
 
-# Stop
-docker stop jev-inference
+# Stats (cache hit rates, queue depth, tokens saved)
+curl http://localhost:8000/health | python3 -m json.tool
+
+# Parity test on real weights (run before first production use)
+SYSTEMONE_MODEL=Cloudflare/clef SYSTEMONE_DEVICE=cuda \
+  uv run --extra clef python smoke_test.py
 ```

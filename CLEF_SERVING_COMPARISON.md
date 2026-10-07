@@ -215,17 +215,17 @@ implementation:
 
 In order of expected impact, with estimated gains on H100 for Clef-Flash 9B:
 
-| # | Action | Estimated gain | Prerequisite | Risk |
+| # | Action | Estimated gain | Status | Notes |
 |---|---|---|---|---|
-| 1 | Install fused DeltaNet kernels | 3-5x on new requests | Linux + CUDA | None; standard packages |
-| 2 | FP8 weights | 1.5-1.8x throughput | H100 FP8 cores | Silent dequant (verify) |
-| 3 | CUDA graphs | 10-30% latency | Fused kernels installed | Memory budget on shared GPU |
-| 4 | Packed batching | 10-30% throughput under mixed lengths | Clef weights for parity check | Minimal |
-| 5 | Head vectorization | 5-15% if head > 10% of latency | Profiling | Low |
-| 6 | State cache (already built) | 0-90 ms/request depending on repeat rate | Phase 0 traffic analysis | DeltaNet conv state divergence (gated by parity) |
-| 7 | Startup prefix (already built) | ~100 tokens saved/request | Clef weights | Minimal |
+| 1 | Install fused DeltaNet kernels | 3-5x on new requests | **Install step only** | `uv sync --extra clef` on EC2; code already uses them when present |
+| 2 | FP8 weights | 1.5-1.8x throughput | **CODED** (`CLEF_FP8=1`) | Path A (pre-quant checkpoint) and Path B (TorchAO) both handled; silent dequant detected |
+| 3 | CUDA graphs | 10-30% latency | **CODED** (`CLEF_COMPILE=1`) | `torch.compile(mode="reduce-overhead")` handles CUDA graphs internally; warmup runs both short and long paths |
+| 4 | Packed batching | 10-30% throughput | **CODED** (`CLEF_PACKED=1`) | Tested on random model; parity on real Clef 27B still needs the EC2 run |
+| 5 | Head vectorization | 5-15% if head > 10% of latency | **DEFERRED** | Only worth doing after profiling shows head dominates; not coded |
+| 6 | State cache | 0-90 ms/request on repeated states | **BUILT** | LRU byte-bounded cache; deepcopy on resume; exposed in `/health` with budget |
+| 7 | Startup prefix | ~100 tokens saved per long request | **BUILT** | Precomputed once at warmup; every long request starts from it |
 
-**Items 1-2 close the kernel gap with vllm-jev. Items 3-5 match their throughput
+**Items 1-2 close the kernel gap with vllm-jev. Items 3-4 match their throughput
 ceiling. Items 6-7 are where we pull ahead — and no competitor has them.**
 
 The compound effect: on repeated-state traffic (the common case for agent sessions),

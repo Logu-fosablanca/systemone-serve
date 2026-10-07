@@ -41,17 +41,18 @@ Clef 27B needs about 54 GB in BF16 (or ~27 GB in FP8 with `CLEF_FP8=1`). Leave r
 
 ```bash
 uv sync --extra clef                # Linux + CUDA only: builds the DeltaNet kernels
-python smoke_test.py                # real weights vs Cloudflare's reference: run this first
+python smoke_test.py --tiny         # check engine logic without downloading real weights
+# python smoke_test.py             # full parity test against real Clef weights (needs ~54 GB VRAM)
 
 export VLLM_API_KEY=$(openssl rand -hex 32)
 MODEL_BACKEND=clef MODEL_PATH=Cloudflare/clef \
-CLEF_FP8=1 PORT=8001 python main.py
+CLEF_FP8=1 python main.py
 ```
 
 Call it:
 
 ```bash
-curl -s localhost:8001/v1/systemone \
+curl -s localhost:8000/v1/systemone \
   -H "Authorization: Bearer $VLLM_API_KEY" -H "Content-Type: application/json" \
   -d '{
         "model": "clef-flash",
@@ -340,11 +341,12 @@ python bench.py --url http://127.0.0.1:8001 --key local --model kev-0.8b --concu
 
 ## Not in it yet
 
-- FP8 weights, CUDA graphs (measured harmful on 4 GB — see [BENCHMARKS.md](BENCHMARKS.md#cuda-graphs-a-negative-result)), fused kernels.
-- Packed/unpadded batching (`cu_seqlens`). The seam is marked in `runtime.py:run_short`; needs Clef weights to verify parity.
-- Images and video. Clef supports them; this API accepts only text and JSON.
-- Partial reuse when a transcript grows. Today only exact state matches are reused.
-- A head-to-head against vllm-jev. `bench.py` drives both; it needs a Linux box.
+- **Packed batching on real weights.** `CLEF_PACKED=1` is coded and tested on a random model; parity against Clef 27B still needs a run with `fla` installed on H100.
+- **Images and video.** Clef supports them; this API accepts only text and JSON states.
+- **Growing-transcript reuse.** Two requests sharing the first 2,000 tokens of a 2,100-token state each recompute the full 2,000 tokens. Only exact-match states are reused today.
+- **A head-to-head against vllm-jev.** `bench.py` drives both; needs a Linux box with real Clef weights.
+
+CUDA graphs were measured harmful on a 4 GB card — see [BENCHMARKS.md](BENCHMARKS.md#cuda-graphs-a-negative-result). `torch.compile(mode="reduce-overhead")` achieves the same effect on H100 and is enabled with `CLEF_COMPILE=1`.
 
 ## Further reading
 

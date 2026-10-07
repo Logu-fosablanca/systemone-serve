@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Annotated, Any, Literal, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ChoiceQuestion(BaseModel):
@@ -35,6 +35,13 @@ class SystemOneRequest(BaseModel):
     # single: 1 forward pass, first token of each option (fast, works when option keys are short)
     # multi:  1 forward pass per option, mean log-prob over all tokens (slower, accurate for long keys)
 
+    @field_validator("state")
+    @classmethod
+    def state_not_none(cls, v: Any) -> Any:
+        if v is None:
+            raise ValueError("state must not be null")
+        return v
+
 
 class ChoiceAnswer(BaseModel):
     type: Literal["choice"] = "choice"
@@ -54,6 +61,7 @@ class ScoreAnswer(BaseModel):
 class NoulAnswer(BaseModel):
     type: Literal["noul"] = "noul"
     noul: float
+    confidence: float
 
 
 Answer = Annotated[Union[ChoiceAnswer, ScoreAnswer, NoulAnswer], Field(discriminator="type")]

@@ -62,6 +62,7 @@ class StateCache:
     def __init__(self, budget_bytes: int) -> None:
         self.budget = budget_bytes
         self.used = 0
+        self.too_large = 0
         self._items: OrderedDict[str, _Saved] = OrderedDict()
 
     def __contains__(self, key: str) -> bool:
@@ -75,7 +76,12 @@ class StateCache:
 
     def put(self, key: str, cache: Any, hidden: torch.Tensor) -> None:
         nbytes = _nbytes(cache, hidden)
-        if key in self._items or nbytes > self.budget:
+        if key in self._items:
+            return
+        if nbytes > self.budget:
+            log.warning("state %s… too large for cache (%.1f MB > %.1f MB budget); not saving",
+                        key[:8], nbytes / 1e6, self.budget / 1e6)
+            self.too_large += 1
             return
         while self.used + nbytes > self.budget:
             self.used -= self._items.popitem(last=False)[1].nbytes
@@ -113,13 +119,32 @@ def _check_kernels(device: str) -> None:
     )
 
 
-def _apply_fp8(model: Any) -> Any:
-    """Quantize backbone linear layers to FP8 dynamic (W8A8).
+def _is_fp8_checkpoint(model: Any) -> bool:
+    """Return True if backbone linear weights are already float8_e4m3fn.
 
-    Uses TorchAO when available, otherwise logs a warning and returns unmodified.
-    The joint head, vision tower, embeddings and norms stay in their original dtype —
-    matching what kurcontko/clef-flash-FP8-Dynamic preserves in BF16.
+    HF transformers can silently convert FP8 weights to BF16 during loading.
+    This detects that and lets the caller decide whether to apply TorchAO instead.
     """
+    for module in model.language_model.modules():
+        w = getattr(module, "weight", None)
+        if w is not None:
+            return w.dtype == torch.float8_e4m3fn
+    return False
+
+
+def _apply_fp8(model: Any) -> Any:
+    """Ensure backbone linear layers run FP8 W8A8.
+
+    Path A: checkpoint already carries float8_e4m3fn weights (e.g.
+    kurcontko/clef-flash-FP8-Dynamic loaded without silent dequant). No TorchAO needed.
+
+    Path B: BF16 checkpoint (or HF silently dequanted an FP8 one). Apply TorchAO
+    dynamic quantization. The joint head, vision tower, embeddings and norms stay BF16,
+    matching what kurcontko's checkpoint preserves.
+    """
+    if _is_fp8_checkpoint(model):
+        log.info("FP8 checkpoint active: backbone weights are float8_e4m3fn")
+        return model
     try:
         from torchao.quantization import Float8DynamicActivationFloat8WeightConfig, PerRow, quantize_
     except ImportError:
@@ -128,7 +153,8 @@ def _apply_fp8(model: Any) -> Any:
     config = Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())
     backbone = model.language_model.model.language_model
     quantize_(backbone, config)
-    log.info("FP8 dynamic quantization applied to backbone (%d layers)", len(list(backbone.layers)))
+    log.info("FP8 dynamic quantization applied to backbone via TorchAO (%d layers)",
+             len(list(backbone.layers)))
     return model
 
 
@@ -301,12 +327,15 @@ class ClefRuntime:
 
     def _result(self, job: Job, logits: list[torch.Tensor]) -> dict[str, Any]:
         questions = job.request["questions"]
-        answers = {
-            q.question_id: self.jsm.systemone_answer(
+        answers = {}
+        for q, l in zip(job.enc.questions, logits):
+            ans = self.jsm.systemone_answer(
                 questions[q.question_id], dict(zip(q.option_ids, l.float().softmax(-1).tolist()))
             )
-            for q, l in zip(job.enc.questions, logits)
-        }
+            if ans.get("type") == "noul" and "confidence" not in ans:
+                n = ans["noul"]
+                ans = {**ans, "confidence": max(n, 1.0 - n)}
+            answers[q.question_id] = ans
         return {"answers": answers, "usage": {"input_tokens": len(job.enc.input_ids), "output_tokens": 0}}
 
     def warmup(self) -> None:
@@ -322,6 +351,11 @@ class ClefRuntime:
             self.text_model = torch.compile(self.text_model, mode="reduce-overhead", dynamic=True)
             log.info("torch.compile applied to backbone; running compiled warmup pass")
             self.run_short([self.prepare({"state": "compile warmup", "questions": questions})])
+            # Also trace the long path so torch.compile doesn't trigger JIT on the first real long request.
+            compile_long = self.prepare({"state": "warmup " * 64, "questions": questions})
+            compile_long.long = True
+            while self.long_step(compile_long) is None:
+                pass
         # Clear warmup entries from the state cache but keep the startup prefix.
         self.states = StateCache(self.states.budget)
         self.stats = dict.fromkeys(self.stats, 0)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -28,14 +29,20 @@ def _env_int(name: str, default: int) -> int:
 
 
 async def require_key(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> None:
-    if creds is None or not hmac.compare_digest(creds.credentials, API_KEY):
-        raise HTTPException(401, "invalid or missing bearer token")
+    if creds is None:
+        raise HTTPException(401, "missing bearer token")
+    if not hmac.compare_digest(creds.credentials, API_KEY):
+        raise HTTPException(401, "invalid bearer token")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not API_KEY:
         raise RuntimeError("VLLM_API_KEY must be set; refusing to serve unauthenticated")
+    if config.model_backend in SYSTEMONE_BACKENDS and (os.getenv("NOUL_YES_TOKEN") or os.getenv("NOUL_NO_TOKEN")):
+        logging.getLogger("jev.config").warning(
+            "NOUL_YES_TOKEN/NOUL_NO_TOKEN have no effect on the %s backend", config.model_backend
+        )
     if config.model_backend in SYSTEMONE_BACKENDS:
         if config.model_backend in RUNTIMES:
             rt = await asyncio.to_thread(
@@ -97,6 +104,9 @@ async def systemone(req: SystemOneRequest):
         if q.type == "choice" and not (1 <= len(q.criteria) <= 255):
             raise HTTPException(400, f"question '{qid}': choice needs 1-255 options")
 
+    if req.scoring == "multi" and config.model_backend in SYSTEMONE_BACKENDS:
+        raise HTTPException(400, f"'scoring: multi' has no effect on the {config.model_backend!r} backend; "
+                                  "omit scoring or use 'single'")
     if config.model_backend in SYSTEMONE_BACKENDS:
         request = {
             "state": req.state,
@@ -105,7 +115,7 @@ async def systemone(req: SystemOneRequest):
         try:
             out = await app.state.clef.submit(request)
         except QueueFull:
-            raise HTTPException(429, "queue full, retry later")
+            raise HTTPException(429, "queue full, retry later", headers={"Retry-After": "2"})
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         answers, tokens = out["answers"], out["usage"]["input_tokens"]
@@ -118,7 +128,7 @@ async def systemone(req: SystemOneRequest):
             )
 
     return SystemOneResponse(
-        model=req.model or app.state.model_name,
+        model=app.state.model_name,
         answers=answers,
         usage=Usage(input_tokens=tokens),
     )
@@ -128,6 +138,11 @@ async def systemone(req: SystemOneRequest):
 async def health():
     clef = getattr(app.state, "clef", None)
     return {"status": "ok", "model": app.state.model_name, **({"stats": clef.stats_snapshot()} if clef else {})}
+
+
+@app.get("/v1/models")
+async def list_models():
+    return {"object": "list", "data": [{"id": app.state.model_name, "object": "model"}]}
 
 
 if __name__ == "__main__":
