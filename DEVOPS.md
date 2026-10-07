@@ -38,13 +38,25 @@ nvidia-smi   # verify GPU visible
 Adds `/v1/systemone` to your vLLM server via a thin proxy. No model is loaded inside
 vLLM's process — the plugin forwards to the engine, which runs as a second process.
 
+> **Two processes mean two GPU allocations.** vLLM reserves ~90% of the card by default
+> (`--gpu-memory-utilization 0.9`), so it will starve the engine if they share a GPU. Pick one:
+>
+> - **Two GPUs (recommended).** Give the engine its own card with `CUDA_VISIBLE_DEVICES=0`
+>   and vLLM the other with `CUDA_VISIBLE_DEVICES=1`. No memory negotiation needed, and the
+>   values below work as written.
+> - **One GPU.** Budget it explicitly. On an 80 GB H100 with Clef 27B in FP8 (~27 GB), a
+>   `CLEF_STATE_CACHE_GB=20` engine leaves roughly 30 GB, so pass
+>   `--gpu-memory-utilization 0.35` to vLLM and verify with `nvidia-smi` before load.
+>   The 40 GB cache below will OOM in this configuration.
+
 ```bash
 git clone <your-repo-url> /opt/jev-inference
 cd /opt/jev-inference
 
-# 1. Start the engine (owns the GPU and the model)
+# 1. Start the engine (owns the model; give it its own GPU if you have two)
 uv sync --extra clef
 export VLLM_API_KEY=$(openssl rand -hex 32)
+CUDA_VISIBLE_DEVICES=0 \
 MODEL_BACKEND=clef MODEL_PATH=Cloudflare/clef PORT=8001 \
   CLEF_FP8=1 CLEF_COMPILE=1 CLEF_PACKED=1 CLEF_STATE_CACHE_GB=40 \
   uv run python main.py &
@@ -52,7 +64,8 @@ MODEL_BACKEND=clef MODEL_PATH=Cloudflare/clef PORT=8001 \
 # 2. Install the plugin into vLLM's venv
 pip install ./vllm_plugin
 
-# 3. Start vLLM with the plugin
+# 3. Start vLLM with the plugin (second GPU; on a shared GPU add --gpu-memory-utilization)
+CUDA_VISIBLE_DEVICES=1 \
 VLLM_PLUGINS=jev_systemone \
 CLEF_ENGINE_URL=http://127.0.0.1:8001 \
 VLLM_API_KEY=$VLLM_API_KEY \
@@ -211,7 +224,8 @@ sudo systemctl start jev-inference
 | Answers differ from reference on cache hits | DeltaNet conv state divergence | Increase tolerance in parity gate; check `CLEF_REVISION` matches the checkpoint |
 | Long first request (30–120 s) | `torch.compile` warmup traces at startup | Expected. `/health` returns only after warmup completes. |
 | `RuntimeError: VLLM_API_KEY must be set` | No API key in env | Add `VLLM_API_KEY=<secret>` to `.env` |
-| vLLM plugin returns 502 | Engine process not running | Start `main.py` on `PORT=8001` before starting vLLM |
+| vLLM plugin returns 502 | Engine process not running | Start `main.py` on `PORT=8001` before starting vLLM. Check `GET /v1/systemone/health` on vLLM's port — it proxies the engine's `/health` |
+| `CUDA out of memory` when co-hosting with vLLM | vLLM reserves ~90% of the card by default and starves the engine | Separate GPUs via `CUDA_VISIBLE_DEVICES`, or budget one card explicitly: lower `CLEF_STATE_CACHE_GB` and pass `--gpu-memory-utilization` to vLLM |
 
 ---
 

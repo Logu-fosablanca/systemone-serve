@@ -65,22 +65,30 @@ across rows, so direct comparison is misleading — the takeaway column says wha
 
 ### How each handles the joint schema head
 
-The joint head is the central constraint. It reads *every* position's hidden state, not
-just the last token. This breaks vLLM's prefix cache, which skips recomputing cached
-tokens and therefore never produces their hidden states.
+The joint head is the central constraint: it reads *every* position's hidden state, not just
+the last token. vllm-jev's own PR describes this as reading "the released joint schema head
+over vLLM's per-token hidden states."
 
-| Implementation | Head strategy | Prefix caching |
+That creates a specific tension with a prefix cache. A prefix cache earns its speedup by
+*skipping the forward pass* over tokens it has already seen — but the forward pass is what
+produces the hidden states the head reads. The saving and the requirement are the same
+operation, so a cache hit over the state region would deprive the head of its input there.
+A KV-block cache holds keys and values; it does not hold final hidden states.
+
+| Implementation | Head strategy | Documented state/prefix reuse |
 |---|---|---|
-| vllm-jev | Runs Cloudflare's head on vLLM's pooled hidden states | Off (structurally incompatible) |
-| open-jevlike-infer | Same as vllm-jev | Off |
-| clef-flash-NVFP4 | Same, via custom `ClefFlashForDecision` pooler | Explicitly off |
-| TensorFold | `hidden_rows()` extracts every position, feeds cuBLAS head | No cache |
-| hachidori | Delegates to Cloudflare's Python head | No cache |
-| **This engine** | Saves `memory_projection(hidden)` (2KB/tok) + DeltaNet state + K/V; resumes from it | **Yes: startup prefix, state cache, growing transcripts** |
+| vllm-jev | Cloudflare's head over vLLM's per-token hidden states | Experimental prefix cache for Open-Jev-2B text, disabled by default; nothing documented for Clef |
+| open-jevlike-infer | vLLM pooling + dynamic micro-batching | none found in published docs (not audited) |
+| clef-flash-NVFP4 | Custom `ClefFlashForDecision` pooler | none found in published docs (not audited) |
+| TensorFold | `hidden_rows()` extracts every position, feeds cuBLAS head | none found in published docs (not audited) |
+| hachidori | Delegates to Cloudflare's Python head | none found in published docs (not audited) |
+| **This engine** | Saves the final hidden states (~8 KB/token at 4,096 dims bf16) + DeltaNet state + K/V; resumes from them | startup prefix, state cache, answer cache, in-flight merging |
 
-**Key insight:** every vLLM-based implementation recomputes the entire input on every
-request, including Clef's fixed system prompt. They get good absolute latency from
-vLLM's kernel stack, but cannot amortise repeated work.
+**What is established:** only vllm-jev's approach was read in any detail, from its README and
+PR #4. The rows marked "not audited" mean no reuse mechanism appears in those projects'
+published documentation — not that none exists in their code. The tension described above
+follows from what a KV-block cache contains and applies to anything built on one; it is not a
+claim that any particular project has prefix caching disabled.
 
 ### Kernel stack
 
@@ -113,12 +121,12 @@ layers are DeltaNet, this dominates wall time.
 
 | Implementation | Any form of state reuse |
 |---|---|
-| vllm-jev | Experimental prefix cache for Open-Jev-2B text only; nothing for Clef |
-| open-jevlike-infer | No |
-| clef-flash-NVFP4 | No |
-| TensorFold | No (explicitly refuses state resumption) |
-| hachidori | No |
-| **This engine** | **Yes: startup prefix, state cache, answer cache, in-flight merging** |
+| vllm-jev | Experimental prefix cache for Open-Jev-2B text, disabled by default; nothing documented for Clef |
+| open-jevlike-infer | none found in published docs (not audited) |
+| clef-flash-NVFP4 | none found in published docs (not audited) |
+| TensorFold | none found in published docs; its notes indicate it does not resume state (not audited) |
+| hachidori | none found in published docs (not audited) |
+| **This engine** | **startup prefix, state cache, answer cache, in-flight merging** (state cache not yet exercised in a benchmark) |
 
 ---
 
@@ -195,25 +203,33 @@ loops over records, questions, and options in Python. If profiling shows the hea
 
 ---
 
-## What none of them do (our advantages)
+## What this engine does differently
 
-These are capabilities unique to this engine, confirmed absent in every surveyed
-implementation:
+These capabilities exist in this engine and do not appear in the surveyed projects'
+published documentation. Only vllm-jev was read in any detail, so "does not appear" means
+exactly that — not that it is absent from their code.
 
-1. **State cache for Clef's joint head.** Every other implementation recomputes the
-   entire input per request. We save the projected hidden states (2 KB/token), K/V
-   cache, and DeltaNet state, then resume from them. For a 4K-token state seen twice,
-   that's ~90 ms saved per hit on H100.
+1. **State cache for Clef's joint head.** We save the final hidden states (~8 KB/token at
+   4,096 dims in bf16), the K/V cache, and the DeltaNet state, then resume from them when
+   the same state returns with new questions. The per-hit saving has not been measured:
+   the only repeat-rate sweep run so far never engaged the cache (see the note in the
+   roadmap section).
 
-2. **Startup prefix precompute.** Clef's system prompt is identical across all requests.
-   We compute it once at warmup. No other implementation does this.
+   Note: a `memory_projection` step that would shrink the saved hidden states to ~2 KB/token
+   was considered but is **not implemented** — `long_step` stores `last_hidden_state`
+   directly. Capacity figures elsewhere that assume 2 KB/token are wrong by 4x.
+
+2. **Startup prefix precompute.** Clef's system prompt is identical across all requests, so
+   it is computed once at warmup (`_compute_startup_prefix`) and every long request resumes
+   from it. No equivalent appears in the other projects' docs.
 
 3. **Answer cache + in-flight merging.** Identical requests (same state, same questions)
    return immediately. Under concurrency, duplicates in flight merge into one GPU job.
    Measured: +110% throughput at 75% repeat rate on Kev.
 
-4. **Cost-aware scheduling.** Short requests run first; long inputs are chunked. Every
-   other implementation uses FCFS, so under mixed load their short-request p95 suffers.
+4. **Cost-aware scheduling.** Short requests run first; long inputs are chunked. The
+   schedulers documented for the other projects are FCFS or single-request, which would
+   make short-request p95 suffer under mixed load — untested either way.
 
 5. **vLLM independence.** The engine runs as its own process and loads no model inside vLLM,
    so it is not tied to a vLLM version. An optional plugin forwards `/v1/systemone` from
