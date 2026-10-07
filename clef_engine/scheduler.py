@@ -60,7 +60,7 @@ class ClefEngine:
         self._answers: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._inflight: dict[str, asyncio.Future] = {}
         self._gpu = ThreadPoolExecutor(1, thread_name_prefix="clef-gpu")
-        self._cpu = ThreadPoolExecutor(1, thread_name_prefix="clef-encode")
+        self._cpu = ThreadPoolExecutor(4, thread_name_prefix="clef-encode")
         self._prefer_long = False
         self._wake: asyncio.Event | None = None
         self._task: asyncio.Task | None = None

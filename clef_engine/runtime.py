@@ -93,10 +93,16 @@ def load_reference(path: Path) -> Any:
     return module
 
 
-def _check_kernels(device: str) -> None:
-    from transformers.models.qwen3_5 import modeling_qwen3_5
+def _has_fused_kernels() -> bool:
+    try:
+        import fla  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
-    if modeling_qwen3_5.is_fast_path_available or not str(device).startswith("cuda"):
+
+def _check_kernels(device: str) -> None:
+    if _has_fused_kernels() or not str(device).startswith("cuda"):
         return
     if os.getenv("CLEF_ALLOW_SLOW_KERNELS") == "1":
         log.warning("DeltaNet fast kernels missing; using the much slower PyTorch fallback")
@@ -105,6 +111,25 @@ def _check_kernels(device: str) -> None:
         "flash-linear-attention and causal-conv1d are not installed, so DeltaNet layers would run the much "
         "slower PyTorch fallback. Install them, or set CLEF_ALLOW_SLOW_KERNELS=1 to run anyway."
     )
+
+
+def _apply_fp8(model: Any) -> Any:
+    """Quantize backbone linear layers to FP8 dynamic (W8A8).
+
+    Uses TorchAO when available, otherwise logs a warning and returns unmodified.
+    The joint head, vision tower, embeddings and norms stay in their original dtype —
+    matching what kurcontko/clef-flash-FP8-Dynamic preserves in BF16.
+    """
+    try:
+        from torchao.quantization import Float8DynamicActivationFloat8WeightConfig, PerRow, quantize_
+    except ImportError:
+        log.warning("CLEF_FP8=1 but torchao is not installed; running in original precision")
+        return model
+    config = Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())
+    backbone = model.language_model.model.language_model
+    quantize_(backbone, config)
+    log.info("FP8 dynamic quantization applied to backbone (%d layers)", len(list(backbone.layers)))
+    return model
 
 
 class ClefRuntime:
@@ -118,6 +143,8 @@ class ClefRuntime:
         chunk_tokens: int = 2048,
         long_state_tokens: int = 1024,
         state_cache_bytes: int = 16 << 30,
+        compile_backbone: bool = False,
+        packed: bool = False,
     ) -> None:
         self.model = model
         self.processor = processor
@@ -130,6 +157,13 @@ class ClefRuntime:
         backbone = model.language_model
         self.text_model = backbone.model.language_model
         self.lm_head_weight = backbone.get_output_embeddings().weight
+        self._compile_backbone = compile_backbone
+        if packed and not _has_fused_kernels():
+            log.warning("CLEF_PACKED=1 ignored: flash-linear-attention is required for "
+                        "packed batching (the reference DeltaNet path doesn't reset "
+                        "recurrent state at cu_seqlens boundaries)")
+            packed = False
+        self._packed = packed
         self.states = StateCache(state_cache_bytes)
         self.stats = {"state_hits": 0, "state_misses": 0, "state_tokens_reused": 0}
         self.prefix_len = self._prefix_len()
@@ -145,6 +179,8 @@ class ClefRuntime:
         jsm = load_reference(path)
         attn = os.getenv("CLEF_ATTN_IMPL")
         model, processor = jsm.load_release_model(path, device=device, **({"attn_implementation": attn} if attn else {}))
+        if os.getenv("CLEF_FP8") == "1" and str(device).startswith("cuda"):
+            model = _apply_fp8(model)
         log.info("Clef loaded from %s (attention override: %s)", path, attn or "none")
         return cls(model, processor, jsm, **kwargs)
 
@@ -187,11 +223,39 @@ class ClefRuntime:
 
     @torch.inference_mode()
     def run_short(self, jobs: list[Job]) -> list[dict[str, Any]]:
-        # ponytail: collate_records pads every record to the same length; switch to
-        # packed batching (cu_seqlens) to eliminate padding waste when records differ
-        # greatly in length. Needs Clef weights to verify parity; see SYSTEMONE_PERF_PLAN.md Phase 4.
+        if self._packed and len(jobs) > 1:
+            return self._run_short_packed(jobs)
         batch = self.jsm.collate_records([job.enc for job in jobs], self.tokenizer.pad_token_id, self.device)
         return [self._result(job, logits) for job, logits in zip(jobs, self.model(batch))]
+
+    def _run_short_packed(self, jobs: list[Job]) -> list[dict[str, Any]]:
+        """Run short records without padding by concatenating into one packed sequence.
+
+        Each record's tokens are concatenated flat; cu_seqlens tells the backbone and
+        attention kernels where each record starts.  The joint head receives per-record
+        hidden states split back out of the packed output.
+        """
+        lengths = [len(job.enc.input_ids) for job in jobs]
+        flat_ids = []
+        for job in jobs:
+            flat_ids.extend(job.enc.input_ids)
+        input_ids = torch.tensor([flat_ids], device=self.device)
+        cu = torch.zeros(len(lengths) + 1, dtype=torch.int32, device=self.device)
+        torch.cumsum(torch.tensor(lengths, dtype=torch.int32, device=self.device), dim=0, out=cu[1:])
+
+        # cu_seq_lens_q is the kwarg name both DeltaNet (via kwargs.pop) and full-attention
+        # (via FlashAttentionKwargs) layers read from **kwargs in transformers' Qwen3.5.
+        out = self.text_model(input_ids=input_ids, cu_seq_lens_q=cu, use_cache=False)
+        hidden = out.last_hidden_state[0]  # [total_tokens, d_model]
+
+        results = []
+        for i, job in enumerate(jobs):
+            start, end = int(cu[i]), int(cu[i + 1])
+            h = hidden[start:end].unsqueeze(0)  # [1, seq_len, d_model]
+            rec_ids = torch.tensor([job.enc.input_ids], device=self.device)
+            logits = self.model.head(h, rec_ids, torch.ones_like(rec_ids), [job.enc], self.lm_head_weight)[0]
+            results.append(self._result(job, logits))
+        return results
 
     @torch.inference_mode()
     def long_step(self, job: Job) -> dict[str, Any] | None:
@@ -254,6 +318,10 @@ class ClefRuntime:
         job.long = True
         while self.long_step(job) is None:
             pass
+        if self._compile_backbone:
+            self.text_model = torch.compile(self.text_model, mode="reduce-overhead", dynamic=True)
+            log.info("torch.compile applied to backbone; running compiled warmup pass")
+            self.run_short([self.prepare({"state": "compile warmup", "questions": questions})])
         # Clear warmup entries from the state cache but keep the startup prefix.
         self.states = StateCache(self.states.budget)
         self.stats = dict.fromkeys(self.stats, 0)

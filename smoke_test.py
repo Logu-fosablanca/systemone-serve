@@ -219,6 +219,18 @@ def main() -> int:
     for job, out, ref in zip(jobs, rt.run_short(jobs), refs):
         bad += compare("short-batch", out["answers"], ref, tol)
 
+    # --- packed batching: same batch, no padding ---
+    # Packed mode requires flash-linear-attention (the reference DeltaNet path doesn't
+    # reset recurrent state at cu_seqlens boundaries). Test only when available.
+    rt_packed = ClefRuntime(rt.model, rt.processor, rt.jsm, packed=True, **settings)
+    if rt_packed._packed:
+        packed_jobs = [rt_packed.prepare(r) for r in RECORDS[:2]]
+        packed_outs = rt_packed.run_short(packed_jobs)
+        for job, packed_out, ref in zip(packed_jobs, packed_outs, refs):
+            bad += compare("packed", packed_out["answers"], ref, tol)
+    else:
+        print("packed       skipped (flash-linear-attention not installed)")
+
     for i, name in ((2, "long"), (3, "long-reused")):
         job = rt.prepare(RECORDS[i])
         assert job.long and job.state_end > rt.prefix_len + settings["chunk_tokens"], (job.state_end, rt.prefix_len)
