@@ -347,5 +347,6 @@ python bench.py --url http://127.0.0.1:8001 --key local --model kev-0.8b --concu
 - [BENCHMARKS.md](BENCHMARKS.md): what has actually been measured, on what, and what hasn't
 - [INFERENCE_ENGINE_PLAN.md](INFERENCE_ENGINE_PLAN.md): what a top-tier inference engine is made of, and where vLLM falls short
 - [SYSTEMONE_PERF_PLAN.md](SYSTEMONE_PERF_PLAN.md): the plan and decision rules for beating vLLM-based Clef
+- [CLEF_SERVING_COMPARISON.md](CLEF_SERVING_COMPARISON.md): every known Clef serving implementation compared — what to adopt, what to skip
 - [Cloudflare: Introducing Clef](https://blog.cloudflare.com/clef-decision-models/)
 - [Clef-flash model card](https://huggingface.co/Cloudflare/clef-flash)
