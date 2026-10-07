@@ -113,6 +113,7 @@ All settings are environment variables.
 | `CLEF_ATTN_IMPL` | transformers default | Override the attention kernel, e.g. `flash_attention_2` |
 | `CLEF_ALLOW_SLOW_KERNELS` | unset | Set to `1` to run without the fast DeltaNet kernels |
 | `KEV_PREFIX_CACHE_GB` | `0` (off) | GPU memory for cached Kev state prefixes. `0.5` fits ~130 short states (150 tok) or ~2 long states (950 tok) on a 4 GB card. Uses VRAM, so set conservatively. |
+| `LAYA_FAST` | `1` on CUDA | Set to `0` to disable TileLang fused kernels + CUDA graphs for Laya. On by default on CUDA. Needs `pip install laya[fast]`. |
 
 ## Serving through vLLM's port
 

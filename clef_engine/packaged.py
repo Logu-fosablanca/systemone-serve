@@ -59,11 +59,9 @@ class PackageRuntime:
     def _tokens(self, request: dict[str, Any]) -> int:
         """Token count for admission control and batch sizing — never for correctness."""
         text = json.dumps(request, ensure_ascii=False)
-        tokenizer = getattr(self.agent, "tokenizer", None)
+        tokenizer = getattr(self.agent, "tokenizer", None) or getattr(self.agent, "tok", None)
         if tokenizer is not None:
             return len(tokenizer.encode(text))
-        # ponytail: byte heuristic, since scripts differ wildly in bytes per token.
-        # Swap for the real tokenizer on any package that exposes one.
         return max(1, len(text.encode()) // 4)
 
     def prepare(self, request: dict[str, Any]) -> Job:
@@ -103,18 +101,48 @@ class PackageRuntime:
 
 
 class LayaRuntime(PackageRuntime):
-    """convaiinnovations/laya-multilingual and other mmBERT-backbone decision models."""
+    """convaiinnovations/laya-multilingual and other mmBERT-backbone decision models.
+
+    Optimizations over the base PackageRuntime:
+    - fast=True loads TileLang fused kernels + CUDA graphs (LAYA_FAST=1)
+    - run_short uses predict_batch to collate all states into shared forward passes
+    """
 
     package = "laya"
 
     @staticmethod
     def _load_agent(model_id: str, device: str) -> Any:
         import laya
+        import os
 
-        return laya.load(model_id)
+        fast = os.getenv("LAYA_FAST", "1" if device.startswith("cuda") else "0") == "1"
+        agent = laya.load(model_id, device=device, fast=fast)
+        if fast and agent._fast is not None:
+            log.info("Laya TileLang fast path active")
+        elif fast:
+            log.warning("LAYA_FAST=1 but fast path unavailable; using stock forward")
+        return agent
 
     def _call(self, state: Any, questions: dict[str, Any]) -> dict[str, Any]:
         return self.agent.predict(state, questions, max_len=self.max_length)
+
+    @torch.inference_mode()
+    def run_short(self, jobs: list[Job]) -> list[dict[str, Any]]:
+        if len(jobs) == 1:
+            return [self._predict(jobs[0])]
+        states = [job.request["state"] for job in jobs]
+        questions = jobs[0].request["questions"]
+        same_questions = all(job.request["questions"] is questions
+                            or job.request["questions"] == questions for job in jobs[1:])
+        if not same_questions:
+            return [self._predict(job) for job in jobs]
+        outs = self.agent.predict_batch(states, questions, max_len=self.max_length)
+        self.stats["records"] += len(jobs)
+        return [
+            {"answers": out["answers"],
+             "usage": out.get("usage") or {"input_tokens": job.cost, "output_tokens": 0}}
+            for job, out in zip(jobs, outs)
+        ]
 
 
 class StrandsRuntime(PackageRuntime):
