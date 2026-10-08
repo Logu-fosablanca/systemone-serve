@@ -196,6 +196,71 @@ async def _kev_engine(rt) -> dict:
     return outs[0]
 
 
+def check_prefix_reuse(rt: ClefRuntime, tol: float) -> int:
+    """A state that extends another must resume from the shared part, not recompute it.
+
+    This is the growing-transcript and fixed-preamble case: turn N's state is turn N-1's
+    plus more, and a RAG request is a constant preamble plus a varying tail. Exact-match
+    reuse does nothing for either, so without this the cache sits idle on the two traffic
+    shapes most likely to show up.
+    """
+    seed = {"state": {"events": LOG["events"][:28]}, "questions": {"urgent": URGENT}}
+    grown = {"state": {"events": LOG["events"] + [{"t": 40, "msg": "user escalated to a supervisor"}]},
+             "questions": {"urgent": URGENT, "mood": MOOD}}
+    # snapshot at every chunk, so a boundary exists below where the two states diverge
+    rt2 = ClefRuntime(rt.model, rt.processor, rt.jsm, chunk_tokens=128,
+                      long_state_tokens=64, prefix_snapshot_tokens=128)
+    ref = rt2.jsm.systemone(rt2.model, rt2.processor, {"model": "ref", **grown})["answers"]
+
+    for record in (seed, grown):
+        job = rt2.prepare(record)
+        assert job.long, "prefix test needs the chunked path"
+        while (out := rt2.long_step(job)) is None:
+            pass
+
+    hit = rt2.stats["prefix_hits"]
+    assert hit == 1, f"expected one partial-prefix hit, got {rt2.stats}"
+    assert rt2.stats["state_hits"] == 0, f"this is a partial match, not an exact one: {rt2.stats}"
+    reused = rt2.stats["state_tokens_reused"]
+    print(f"prefix-reuse resumed from token {reused} of {job.state_end} "
+          f"({100 * reused / job.state_end:.0f}% of the state skipped)")
+    # Resuming mid-state must give the same answer as computing it all.
+    return compare("prefix-reuse", out["answers"], ref, tol)
+
+
+def check_batch_invariance(rt: ClefRuntime, tol: float) -> int:
+    """The same record must answer the same way whatever else shares its batch.
+
+    Batching changes the GEMM shapes, cuBLAS picks a different kernel, and the reduction
+    order changes with it. For a chat model a 1e-3 logit wobble is invisible against a
+    150k vocabulary. Here the argmax over a handful of options *is* the output, so a
+    wobble between two close options flips the decision — and it flips as a function of
+    how busy the server happens to be, which is not reproducible and not auditable.
+    """
+    ref = rt.run_short([rt.prepare(RECORDS[0])])[0]["answers"]
+    worst, flips = 0.0, 0
+    for n in (2, 4, 8, 16, 32):
+        jobs = [rt.prepare(RECORDS[0])] + [rt.prepare(RECORDS[1]) for _ in range(n - 1)]
+        got = rt.run_short(jobs)[0]["answers"]
+        delta, flipped = 0.0, []
+        for qid, r in ref.items():
+            g = got[qid]
+            if r["type"] == "choice":
+                delta = max(delta, max(abs(g["probabilities"][k] - v) for k, v in r["probabilities"].items()))
+                if g["choice"] != r["choice"]:
+                    flipped.append(qid)
+            elif r["type"] == "score":
+                delta = max(delta, abs(g["score"] - r["score"]) / max(1, len(r["legend"])))
+            else:
+                delta = max(delta, abs(g["noul"] - r["noul"]))
+        worst, flips = max(worst, delta), flips + len(flipped)
+        mark = f"FLIPPED {flipped}" if flipped else "stable"
+        print(f"batch-inv    n={n:<3d} max_delta={delta:.2e}  {mark}")
+    print(f"batch-inv    worst={worst:.2e} over batches 2..32, tolerance {tol:.0e}, {flips} flips")
+    # A flip is a wrong answer, not a rounding artefact: fail on it regardless of delta.
+    return 1 if flips or worst > tol else 0
+
+
 def _check_fp8(tiny: bool) -> int:
     """Compare BF16 reference answers vs TorchAO FP8-quantized answers on the same records."""
     from clef_engine.runtime import _apply_fp8
@@ -259,6 +324,8 @@ def main() -> int:
         bad += compare(name, out["answers"], refs[i], tol)
     assert rt.stats["state_hits"] == 1 and rt.stats["state_misses"] == 1, rt.stats
 
+    bad += check_prefix_reuse(rt, tol)
+    bad += check_batch_invariance(rt, tol)
     bad += asyncio.run(check_engine(rt, refs[0], tol))
     print(f"prefix tokens: {rt.prefix_len}, stats: {rt.stats}")
     print("PASS" if not bad else f"FAIL: {bad} mismatches")

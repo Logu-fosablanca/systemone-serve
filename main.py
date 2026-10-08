@@ -71,6 +71,8 @@ async def lifespan(app: FastAPI):
                 state_cache_bytes=int(float(os.getenv("CLEF_STATE_CACHE_GB", "16")) * 2**30),
                 compile_backbone=os.getenv("CLEF_COMPILE") == "1",
                 packed=os.getenv("CLEF_PACKED") == "1",
+                prefix_snapshot_tokens=_env_int("CLEF_PREFIX_SNAPSHOT_TOKENS", 4096),
+                fp32_head=os.getenv("CLEF_FP32_HEAD") == "1",
             )
         await asyncio.to_thread(rt.warmup)
         app.state.clef = ClefEngine(

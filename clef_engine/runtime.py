@@ -40,6 +40,15 @@ class Job:
     pos: int = 0  # state tokens prefilled so far (long path)
     cache: Any = None
     hidden: list[torch.Tensor] = field(default_factory=list)
+    # (position, key, snapshot_here) at every chunk boundary in the state, ascending.
+    # Lookup matches any of them; only the flagged ones are written back.
+    prefix_keys: list[tuple[int, str, bool]] = field(default_factory=list)
+
+    def boundary_at(self, pos: int) -> tuple[str, bool] | None:
+        for p, key, snap in self.prefix_keys:
+            if p == pos:
+                return key, snap
+        return None
 
 
 @dataclass
@@ -54,6 +63,50 @@ def _nbytes(cache: Any, hidden: torch.Tensor) -> int:
     for layer in cache.layers:
         tensors += [getattr(layer, name, None) for name in ("keys", "values", "conv_states", "recurrent_states")]
     return sum(t.numel() * t.element_size() for t in tensors if isinstance(t, torch.Tensor))
+
+
+def _prefix_keys(
+    ids: Any, start: int, end: int, chunk: int, snapshot_every: int
+) -> list[tuple[int, str, bool]]:
+    """Chained hashes at every chunk boundary in [start, end], plus `end` itself.
+
+    Chained rather than hashing each prefix from scratch, so building the list is linear
+    in the state length. Every boundary is a lookup point, which maximises the chance of
+    matching a shared prefix; only every `snapshot_every`-th one (and `end`) is written
+    back, which bounds how much a single long state can occupy.
+    """
+    keys: list[tuple[int, str, bool]] = []
+    digest = hashlib.sha256(array("q", ids[:start]).tobytes()).digest()
+    pos, i = start, 0
+    while pos < end:
+        nxt = min(pos + chunk, end)
+        digest = hashlib.sha256(digest + array("q", ids[pos:nxt]).tobytes()).digest()
+        pos, i = nxt, i + 1
+        keys.append((pos, digest.hex(), i % snapshot_every == 0 or pos == end))
+    return keys
+
+
+class _Fp32Head(torch.nn.Module):
+    """Run the joint schema head in fp32 while the backbone stays bf16 or FP8.
+
+    The head decides the answer, so a rounding difference there can flip the argmax
+    between two close options. The backbone is where the parameters are, so it keeps its
+    own precision; the head is small enough that fp32 costs little. The fp32 copy of the
+    output embedding is materialised once and held.
+    """
+
+    def __init__(self, head: Any) -> None:
+        super().__init__()
+        self.head = head.float()
+        self._w32: torch.Tensor | None = None
+
+    def forward(self, hidden: torch.Tensor, input_ids: Any, mask: Any, records: Any,
+                lm_head_weight: torch.Tensor) -> Any:
+        if self._w32 is None:
+            self._w32 = lm_head_weight.float()
+            log.info("fp32 output embedding materialised for the head (%.1f GB)",
+                     self._w32.numel() * 4 / 1e9)
+        return self.head(hidden.float(), input_ids, mask, records, self._w32)
 
 
 class StateCache:
@@ -73,6 +126,24 @@ class StateCache:
         if saved is not None:
             self._items.move_to_end(key)
         return saved
+
+    def longest(self, keys: list[tuple[int, str, bool]], touch: bool = True) -> tuple[int, _Saved | None]:
+        """Deepest cached boundary among `keys`, or (0, None).
+
+        Keys are ascending by position, so walking backwards returns the longest
+        shared prefix: a transcript that grew, or a request sharing a fixed preamble,
+        resumes from as far in as we have rather than recomputing from the start.
+
+        `touch=False` skips the LRU reorder. prepare() runs on the encode thread while
+        the GPU thread may be in long_step, and only one of them may mutate the ordering.
+        """
+        for pos, key, _ in reversed(keys):
+            saved = self._items.get(key)
+            if saved is not None:
+                if touch:
+                    self._items.move_to_end(key)
+                return pos, saved
+        return 0, None
 
     def put(self, key: str, cache: Any, hidden: torch.Tensor) -> None:
         nbytes = _nbytes(cache, hidden)
@@ -171,6 +242,8 @@ class ClefRuntime:
         state_cache_bytes: int = 16 << 30,
         compile_backbone: bool = False,
         packed: bool = False,
+        prefix_snapshot_tokens: int = 4096,
+        fp32_head: bool = False,
     ) -> None:
         self.model = model
         self.processor = processor
@@ -190,8 +263,16 @@ class ClefRuntime:
                         "recurrent state at cu_seqlens boundaries)")
             packed = False
         self._packed = packed
+        # Snapshot spacing is independent of chunk size: every chunk boundary is a lookup
+        # point, but writing one back every chunk would make a long state cost O(n^2/chunk).
+        self._snapshot_every = max(1, prefix_snapshot_tokens // max(1, chunk_tokens))
+        if fp32_head:
+            model.head = _Fp32Head(model.head)
+            log.info("joint head running in fp32; the padded short-batch path is unaffected "
+                     "unless CLEF_PACKED=1 is also set")
+        self._fp32_head = fp32_head
         self.states = StateCache(state_cache_bytes)
-        self.stats = {"state_hits": 0, "state_misses": 0, "state_tokens_reused": 0}
+        self.stats = {"state_hits": 0, "prefix_hits": 0, "state_misses": 0, "state_tokens_reused": 0}
         self.prefix_len = self._prefix_len()
         self._startup_cache: Any = None      # precomputed after warmup()
         self._startup_hidden: Any = None     # [prefix_len, d_model] fp32
@@ -242,10 +323,19 @@ class ClefRuntime:
         # empty state tell us where the state ends.
         empty = self.jsm.encode_record(self.tokenizer, {**request, "state": ""}, max_length=self.max_length)
         state_end = len(enc.input_ids) - (len(empty.input_ids) - self.prefix_len)
-        state_key = hashlib.sha256(array("q", enc.input_ids[:state_end]).tobytes()).hexdigest()
         long = state_end - self.prefix_len >= self.long_state_tokens
-        cost = len(enc.input_ids) - (state_end if long and state_key in self.states else 0)
-        return Job(request, enc, state_end, state_key, long, cost)
+        keys = (
+            _prefix_keys(enc.input_ids, self.prefix_len, state_end, self.chunk_tokens, self._snapshot_every)
+            if long else []
+        )
+        state_key = keys[-1][1] if keys else hashlib.sha256(
+            array("q", enc.input_ids[:state_end]).tobytes()
+        ).hexdigest()
+        # Cost is what is left after the deepest prefix we already hold, so the scheduler
+        # prices a request that shares a preamble like the small job it actually is.
+        reuse = self.states.longest(keys, touch=False)[0] if long else 0
+        cost = len(enc.input_ids) - reuse
+        return Job(request, enc, state_end, state_key, long, cost, prefix_keys=keys)
 
     @torch.inference_mode()
     def run_short(self, jobs: list[Job]) -> list[dict[str, Any]]:
@@ -288,11 +378,11 @@ class ClefRuntime:
         """Advance a long record by one chunk. Returns its result once it is done, else None."""
         ids = job.enc.input_ids
         if job.pos == 0:
-            saved = self.states.get(job.state_key)
+            hit, saved = self.states.longest(job.prefix_keys)
             if saved is not None:
-                job.cache, job.hidden, job.pos = copy.deepcopy(saved.cache), [saved.hidden], job.state_end
-                self.stats["state_hits"] += 1
-                self.stats["state_tokens_reused"] += job.state_end
+                job.cache, job.hidden, job.pos = copy.deepcopy(saved.cache), [saved.hidden], hit
+                self.stats["state_hits" if hit == job.state_end else "prefix_hits"] += 1
+                self.stats["state_tokens_reused"] += hit
             else:
                 self.stats["state_misses"] += 1
                 # Reuse the precomputed startup prefix so every long request avoids
@@ -303,15 +393,24 @@ class ClefRuntime:
                     job.hidden = [self._startup_hidden]
                     job.pos = self.prefix_len
         if job.pos < job.state_end:
-            end = min(job.pos + self.chunk_tokens, job.state_end)
+            # Stop at the next boundary prepare() hashed, so a save lands on the same grid
+            # a later request will look up. Without this the grid shifts by prefix_len
+            # depending on whether the startup prefix was available to resume from.
+            nxt = next((p for p, _, _ in job.prefix_keys if p > job.pos), job.state_end)
+            end = min(job.pos + self.chunk_tokens, nxt, job.state_end)
             hidden, job.cache = self._prefill(ids[job.pos : end], job.cache)
             job.hidden.append(hidden)
             job.pos = end
             job.cost = len(ids) - end
+            mark = job.boundary_at(end)
+            if mark is not None and mark[1]:
+                # put() deep-copies, so the job keeps advancing on its own cache.
+                job.hidden = [torch.cat(job.hidden)]
+                self.states.put(mark[0], job.cache, job.hidden[0])
             if end < job.state_end:
                 return None
-            job.hidden = [torch.cat(job.hidden)]
-            self.states.put(job.state_key, job.cache, job.hidden[0])
+            if len(job.hidden) > 1:
+                job.hidden = [torch.cat(job.hidden)]
         hidden, _ = self._prefill(ids[job.state_end :], job.cache)
         full = torch.cat([job.hidden[0], hidden])[None]
         job.cache, job.hidden = None, []
