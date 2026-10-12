@@ -221,3 +221,11 @@ __marimo__/
 
 # Project-specific
 graphify-out/
+
+# Third-party artwork dropped in for reference; not ours to redistribute
+diagrams/images.jpg
+
+# uv.lock belongs in version control, but only once resolved on Linux with the
+# clef extra -- a Windows resolution cannot see flash-linear-attention or
+# causal-conv1d. Regenerate on the GPU box and commit that one.
+uv.lock
