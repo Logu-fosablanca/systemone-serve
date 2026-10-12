@@ -1,0 +1,43 @@
+<!doctype html>
+<meta charset="utf-8">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>html,body{margin:0;padding:0;width:1000px;height:1000px;overflow:hidden;background:#fff}svg{display:block;width:1000px;height:1000px}</style>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000">
+  <rect x="0" y="0" width="1000" height="1000" fill="#ffffff"/>
+  <text x="60" y="92" font-family="IBM Plex Sans, sans-serif" font-size="44" font-weight="600" fill="#16202b">What Clef reads</text>
+  <text x="60" y="134" font-family="IBM Plex Sans, sans-serif" font-size="25" fill="#5a6775">The state comes before the questions. That ordering is the whole trick.</text>
+
+  <rect x="60" y="300" width="150" height="104" fill="#dde3ea" stroke="#5a6775" stroke-width="1.5"/>
+  <rect x="210" y="300" width="400" height="104" fill="#d6e3f0" stroke="#1f4e79" stroke-width="2"/>
+  <rect x="610" y="300" width="250" height="104" fill="#ffffff" stroke="#5a6775" stroke-width="1.5"/>
+  <rect x="860" y="300" width="80" height="104" fill="#f1f3f6" stroke="#5a6775" stroke-width="1.5"/>
+
+  <text x="135" y="345" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="20" fill="#16202b">system</text>
+  <text x="135" y="369" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="20" fill="#16202b">prompt</text>
+  <text x="135" y="393" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="18" fill="#5a6775">~36 tok</text>
+
+  <text x="410" y="348" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="26" font-weight="600" fill="#16202b">your state</text>
+  <text x="410" y="378" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="21" fill="#5a6775">a transcript, a ticket, JSON</text>
+  <text x="410" y="399" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="18" fill="#5a6775">any length</text>
+
+  <text x="735" y="345" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="20" fill="#16202b">questions +</text>
+  <text x="735" y="369" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="20" fill="#16202b">allowed options</text>
+  <text x="735" y="393" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="18" fill="#5a6775">varies</text>
+
+  <text x="900" y="357" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="19" fill="#16202b">close</text>
+  <text x="900" y="381" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="18" fill="#5a6775">fixed</text>
+
+  <path d="M60 428 L60 450 L610 450 L610 428" fill="none" stroke="#1f4e79" stroke-width="2.5"/>
+  <text x="335" y="492" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="24" font-weight="600" fill="#1f4e79">same for every question about this state</text>
+  <path d="M610 428 L610 450 L940 450 L940 428" fill="none" stroke="#9c4221" stroke-width="2.5"/>
+  <text x="775" y="524" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="24" font-weight="600" fill="#9c4221">differs per request</text>
+
+  <rect x="60" y="590" width="880" height="190" fill="#f6f8fa" stroke="#c9d1da" stroke-width="1.5"/>
+  <text x="96" y="645" font-family="IBM Plex Sans, sans-serif" font-size="26" font-weight="600" fill="#16202b">The model is causal.</text>
+  <text x="96" y="690" font-family="IBM Plex Sans, sans-serif" font-size="24" fill="#16202b">Each token can only see tokens before it. So the state's hidden</text>
+  <text x="96" y="724" font-family="IBM Plex Sans, sans-serif" font-size="24" fill="#16202b">states do not depend on the questions that follow. Compute them</text>
+  <text x="96" y="758" font-family="IBM Plex Sans, sans-serif" font-size="24" fill="#16202b">once, then ask anything you like.</text>
+
+  <text x="60" y="880" font-family="IBM Plex Mono, monospace" font-size="20" fill="#5a6775">prefix length is measured at startup, not hardcoded: encode two records</text>
+  <text x="60" y="910" font-family="IBM Plex Mono, monospace" font-size="20" fill="#5a6775">differing only in state, and see where the token ids first diverge</text>
+</svg>

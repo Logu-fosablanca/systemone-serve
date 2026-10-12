@@ -217,7 +217,9 @@ exactly that — not that it is absent from their code.
 
    Note: a `memory_projection` step that would shrink the saved hidden states to ~2 KB/token
    was considered but is **not implemented** — `long_step` stores `last_hidden_state`
-   directly. Capacity figures elsewhere that assume 2 KB/token are wrong by 4x.
+   directly, at ~8 KB/token. That part is 4x larger than planned, but K/V for the
+   full-attention layers dominates a saved state at ~32 KB/token, so the totals move by
+   only ~13%. See SYSTEMONE_PERF_PLAN.md §4.
 
 2. **Startup prefix precompute.** Clef's system prompt is identical across all requests, so
    it is computed once at warmup (`_compute_startup_prefix`) and every long request resumes

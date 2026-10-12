@@ -8,7 +8,7 @@
 
 Send a state (text or JSON) and a set of typed questions. Get back a probability for every allowed answer. Nothing is generated, so each request is one pass through the model plus a small scoring step.
 
-> **Status.** Every engine path matches Cloudflare's reference implementation on a small random model (CPU). The `kev` backend additionally matches Kev's own forward pass on **real weights**, on CPU fp32 and GPU bf16, and has been benchmarked — see [BENCHMARKS.md](BENCHMARKS.md). Clef itself has not yet run on real weights (27B needs ~54 GB BF16 / ~27 GB FP8), nothing has run on an H100, and there is no head-to-head against vllm-jev yet.
+> **Status.** Every engine path matches Cloudflare's reference implementation on a small random model (CPU). The `kev` backend additionally matches Kev's own forward pass on **real weights**, on CPU fp32 and GPU bf16, and has been benchmarked — see [BENCHMARKS.md](BENCHMARKS.md). Clef itself has not yet run on real weights (27B needs 55 GB BF16 / ~29 GB FP8), nothing has run on an H100, and there is no head-to-head against vllm-jev yet.
 
 ## Contents
 
@@ -37,12 +37,12 @@ Send a state (text or JSON) and a set of typed questions. Get back a probability
 
 ## Quick start
 
-Clef 27B needs about 54 GB in BF16 (or ~27 GB in FP8 with `CLEF_FP8=1`). Leave room for activations and saved states (16 GB by default). Clef-flash (9B) needs ~19 GB.
+Clef 27B needs 55 GB in BF16, or ~29 GB in FP8 with `CLEF_FP8=1` — FP8 quantizes the backbone only, so embeddings and norms stay BF16. Leave room for activations and saved states (16 GB by default). Clef-flash (9B) needs 18.8 GB.
 
 ```bash
 uv sync --extra clef                # Linux + CUDA only: builds the DeltaNet kernels
 python smoke_test.py --tiny         # check engine logic without downloading real weights
-# python smoke_test.py             # full parity test against real Clef weights (needs ~54 GB VRAM)
+# python smoke_test.py             # full parity test against real Clef weights (needs 55 GB VRAM)
 
 export VLLM_API_KEY=$(openssl rand -hex 32)
 MODEL_BACKEND=clef MODEL_PATH=Cloudflare/clef \
@@ -108,7 +108,7 @@ All settings are environment variables.
 | `CLEF_BATCH_MAX` | `32` | Records per short batch |
 | `CLEF_MAX_QUEUED_TOKENS` | `524288` | Queued work allowed before new requests get HTTP 429 |
 | `CLEF_ANSWER_CACHE_SIZE` | `10000` | Answers remembered for exact repeats |
-| `CLEF_FP8` | unset | Set to `1` for FP8 dynamic quantization (W8A8) via TorchAO. Near-mandatory for 27B (cuts weights from ~54 GB to ~27 GB). |
+| `CLEF_FP8` | unset | Set to `1` for FP8 dynamic quantization (W8A8) via TorchAO. Near-mandatory for 27B (cuts weights from 55 GB to ~29 GB). Needs SM89+ to execute. |
 | `CLEF_COMPILE` | unset | Set to `1` to torch.compile the backbone (`reduce-overhead` + `dynamic=True`). Adds warmup time but fuses kernels. |
 | `CLEF_PACKED` | unset | Set to `1` for packed batching via cu_seqlens (requires flash-linear-attention). Eliminates padding waste. |
 | `CLEF_ATTN_IMPL` | transformers default | Override the attention kernel, e.g. `flash_attention_2` |

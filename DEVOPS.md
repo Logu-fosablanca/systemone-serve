@@ -62,7 +62,7 @@ vLLM's process — the plugin forwards to the engine, which runs as a second pro
 > - **Two GPUs (recommended).** Give the engine its own card with `CUDA_VISIBLE_DEVICES=0`
 >   and vLLM the other with `CUDA_VISIBLE_DEVICES=1`. No memory negotiation needed, and the
 >   values below work as written.
-> - **One GPU.** Budget it explicitly. On an 80 GB H100 with Clef 27B in FP8 (~27 GB), a
+> - **One GPU.** Budget it explicitly. On an 80 GB H100 with Clef 27B in FP8 (~29 GB), a
 >   `CLEF_STATE_CACHE_GB=20` engine leaves roughly 30 GB, so pass
 >   `--gpu-memory-utilization 0.35` to vLLM and verify with `nvidia-smi` before load.
 >   The 40 GB cache below will OOM in this configuration.
@@ -149,7 +149,9 @@ CLEF_ANSWER_CACHE_SIZE=10000
 # SYSTEMONE_MODEL=Cloudflare/clef    model ID used by smoke_test.py
 ```
 
-> **Clef-Flash 9B on A10G:** set `MODEL_PATH=Cloudflare/clef-flash`, `CLEF_STATE_CACHE_GB=8`.
+> **Clef-Flash 9B on a 24 GB card (A10G, L4):** set `MODEL_PATH=Cloudflare/clef-flash` and
+> `CLEF_STATE_CACHE_GB=2`. Weights take 18.8 GB of the 24, so a larger cache budget will
+> OOM; use `CLEF_STATE_CACHE_OFFLOAD=1` if you want a bigger one.
 > FP8 is still recommended: use `kurcontko/clef-flash-FP8-Dynamic` as `MODEL_PATH`.
 
 ---
@@ -237,7 +239,7 @@ sudo systemctl start jev-inference
 | Symptom | Cause | Fix |
 |---|---|---|
 | Startup: `flash-linear-attention and causal-conv1d are not installed` | Wrong `uv sync` — base deps only | `uv sync --extra clef` (or Docker rebuild) |
-| `CUDA out of memory` on startup | BF16 27B needs 54 GB | Set `CLEF_FP8=1` or switch to `clef-flash` |
+| `CUDA out of memory` on startup | BF16 27B needs 55 GB | Set `CLEF_FP8=1` (needs SM89+) or switch to `clef-flash` |
 | Startup log shows `running in original precision` | torchao not installed | `uv add torchao`, or load a pre-quantized FP8 checkpoint directly |
 | Answers differ from reference on cache hits | DeltaNet conv state divergence | Increase tolerance in parity gate; check `CLEF_REVISION` matches the checkpoint |
 | Long first request (30–120 s) | `torch.compile` warmup traces at startup | Expected. `/health` returns only after warmup completes. |

@@ -321,18 +321,23 @@ to the reference, on the tiny fp32 model.
 Why not snapshot at every chunk and maximise the hit rate?
 
 Because the **DeltaNet recurrent snapshot is a fixed size per boundary** (§3), regardless
-of block size. Hidden states cost ~8 KB/token (4,096 dims at bf16) and scale with length.
-The recurrent state does not — it is the same size whether the boundary sits at token 256
-or 4096.
+of block size.
 
-Rough figures for 27B, 24 linear-attention layers, recurrent state on the order of 0.5 MB
-per layer, so **R ≈ 12–16 MB per snapshot** — an estimate, not measured:
+Two kinds of cost, from the `config.json`-derived estimates in SYSTEMONE_PERF_PLAN.md §4:
 
-| Spacing | Recurrent overhead | Against ~8 KB/token of hidden state |
+- **Scales with length:** K/V for the 8 full-attention layers at ~32 KB/token, plus the
+  hidden states at ~8 KB/token (4,096 dims, bf16). About **40 KB/token** together.
+- **Fixed per snapshot:** the DeltaNet running state across 24 layers, ~50 MB, plus ~1.2 MB
+  of convolution state. About **51 MB**, the same whether the boundary sits at token 256
+  or token 4096.
+
+Halving the interval therefore doubles the fixed part per token:
+
+| Spacing | Fixed cost amortised | Against ~40 KB/token that scales |
 |---|---|---|
-| 4096 (default) | ~3–4 KB/token | ~40% |
-| 1024 | ~14 KB/token | ~175% |
-| 256 | ~56 KB/token | ~700% |
+| 4096 (default) | ~13 KB/token | ~32% overhead |
+| 1024 | ~51 KB/token | ~128% |
+| 256 | ~204 KB/token | ~510% |
 
 Fine granularity is unaffordable in VRAM. That is why the default interval is coarse, and
 why vLLM-Omni put their cache on the host.

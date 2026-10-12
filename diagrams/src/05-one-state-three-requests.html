@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>html,body{margin:0;padding:0;width:1000px;height:1000px;overflow:hidden;background:#fff}svg{display:block;width:1000px;height:1000px}</style>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000">
+  <rect x="0" y="0" width="1000" height="1000" fill="#ffffff"/>
+  <text x="60" y="88" font-family="IBM Plex Sans, sans-serif" font-size="42" font-weight="600" fill="#16202b">One state, three requests</text>
+  <text x="60" y="128" font-family="IBM Plex Sans, sans-serif" font-size="24" fill="#5a6775">What actually gets computed each time.</text>
+
+  <rect x="60" y="168" width="28" height="22" fill="#1f4e79"/>
+  <text x="98" y="187" font-family="IBM Plex Sans, sans-serif" font-size="20" fill="#5a6775">computed</text>
+  <rect x="232" y="168" width="28" height="22" fill="#d6e3f0" stroke="#1f4e79" stroke-width="1.5"/>
+  <text x="270" y="187" font-family="IBM Plex Sans, sans-serif" font-size="20" fill="#5a6775">restored from cache</text>
+  <rect x="474" y="168" width="28" height="22" fill="#ffffff" stroke="#c9d1da" stroke-width="1.5"/>
+  <text x="512" y="187" font-family="IBM Plex Sans, sans-serif" font-size="20" fill="#5a6775">not run</text>
+
+  <text x="60" y="258" font-family="IBM Plex Sans, sans-serif" font-size="26" font-weight="600" fill="#16202b">A</text>
+  <text x="96" y="258" font-family="IBM Plex Sans, sans-serif" font-size="24" fill="#16202b">a 3,000-token transcript, two questions</text>
+  <rect x="60" y="276" width="640" height="54" fill="#1f4e79"/>
+  <rect x="700" y="276" width="160" height="54" fill="#1f4e79"/>
+  <text x="380" y="310" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="22" fill="#ffffff">state, in chunks</text>
+  <text x="780" y="310" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="22" fill="#ffffff">questions</text>
+  <text x="60" y="364" font-family="IBM Plex Sans, sans-serif" font-size="22" fill="#5a6775">computes everything, then saves the state</text>
+
+  <text x="60" y="462" font-family="IBM Plex Sans, sans-serif" font-size="26" font-weight="600" fill="#16202b">B</text>
+  <text x="96" y="462" font-family="IBM Plex Sans, sans-serif" font-size="24" fill="#16202b">same transcript, a different question</text>
+  <rect x="60" y="480" width="640" height="54" fill="#d6e3f0" stroke="#1f4e79" stroke-width="1.5"/>
+  <rect x="700" y="480" width="160" height="54" fill="#1f4e79"/>
+  <text x="380" y="514" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="22" fill="#1f4e79">state pass skipped</text>
+  <text x="780" y="514" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="22" fill="#ffffff">questions</text>
+  <text x="60" y="568" font-family="IBM Plex Sans, sans-serif" font-size="22" fill="#5a6775">resumes from the saved state: hidden states, K/V, DeltaNet state</text>
+
+  <text x="60" y="666" font-family="IBM Plex Sans, sans-serif" font-size="26" font-weight="600" fill="#16202b">C</text>
+  <text x="96" y="666" font-family="IBM Plex Sans, sans-serif" font-size="24" fill="#16202b">an exact repeat of A</text>
+  <rect x="60" y="684" width="640" height="54" fill="#ffffff" stroke="#c9d1da" stroke-width="1.5"/>
+  <rect x="700" y="684" width="160" height="54" fill="#ffffff" stroke="#c9d1da" stroke-width="1.5"/>
+  <text x="460" y="718" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="22" fill="#5a6775">answer cache, no GPU work at all</text>
+  <text x="60" y="772" font-family="IBM Plex Sans, sans-serif" font-size="22" fill="#5a6775">identical requests arriving together merge into one job</text>
+
+  <rect x="60" y="820" width="880" height="126" fill="#f6f8fa" stroke="#c9d1da" stroke-width="1.5"/>
+  <text x="96" y="864" font-family="IBM Plex Sans, sans-serif" font-size="23" font-weight="600" fill="#16202b">No timings shown on purpose.</text>
+  <text x="96" y="898" font-family="IBM Plex Sans, sans-serif" font-size="21" fill="#5a6775">Clef 27B on an 80 GB card has not been benchmarked.</text>
+  <text x="96" y="926" font-family="IBM Plex Sans, sans-serif" font-size="21" fill="#5a6775">Until it has, the shape is the claim.</text>
+</svg>

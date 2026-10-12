@@ -88,14 +88,29 @@ Prefill time per request (*est.*): 300 tokens ≈ 7-10 ms · 1K ≈ 22 ms · 4K 
 
 Memory needed to keep one saved state:
 
-| Part | Size |
-|---|---|
-| K/V for the 8 attention layers | 32 KB per token |
-| Head memory, already projected to width 1024 | 2 KB per token |
-| DeltaNet running state, 24 layers (fp32) | ≈50 MB, fixed |
-| Convolution state | ≈1.2 MB, fixed |
+| Part | Planned | **As built** |
+|---|---|---|
+| K/V for the 8 attention layers | 32 KB per token | 32 KB per token |
+| Head memory | 2 KB per token, projected to width 1024 | **8 KB per token** — see below |
+| DeltaNet running state, 24 layers (fp32) | ≈50 MB, fixed | ≈50 MB, fixed |
+| Convolution state | ≈1.2 MB, fixed | ≈1.2 MB, fixed |
 
-So a saved 1K-token state ≈ 85 MB, 4K ≈ 190 MB, 16K ≈ 600 MB. On a dedicated H100, about 45 GB is left for saved states after weights and working memory: roughly 230 states of 4K tokens. Host RAM holds more. Reloading 190 MB over PCIe takes ≈4-8 ms, against ≈90 ms to recompute it.
+> **The projection was never implemented.** `long_step` stores `last_hidden_state`
+> directly, at full width — 4,096 dims in bf16, so 8 KB per token, not 2. Projecting to
+> the head's working width before saving would cut that back and is the single biggest
+> capacity win still available, if the head exposes the projection.
+
+So a saved state is ≈40 KB per token plus ≈51 MB fixed: **1K ≈ 92 MB, 4K ≈ 215 MB, 16K ≈ 706 MB.**
+K/V dominates, which is why getting the head memory wrong by 4x moves the totals by only
+about 13%.
+
+On a dedicated H100, about 45 GB is left for saved states after weights and working
+memory: roughly 200 states of 4K tokens. `CLEF_STATE_CACHE_OFFLOAD=1` moves the budget to
+host RAM, which holds far more. Reloading 215 MB over PCIe takes ≈4-8 ms, against ≈90 ms
+to recompute it.
+
+These are estimates from `config.json`. `_nbytes()` measures the real figure per entry at
+runtime, and `/health` reports the total as `state_cache_bytes`.
 
 ---
 
@@ -179,7 +194,7 @@ Snapshots sit on 64-token block boundaries, found by cumulative hashes of token 
 
 ### Phase 5: Production and upstream (≈1 week)
 - nginx routing as in section 6, both services checking the same `VLLM_API_KEY`.
-- Replace the current vLLM endpoint plugin with a thin proxy. As built, it loads a second Clef copy (≈19 GB) inside vLLM's API-server process. That won't fit beside vLLM's default 90% GPU memory reservation, and with several API-server processes each would load its own copy.
+- ~~Replace the current vLLM endpoint plugin with a thin proxy.~~ **Done.** `vllm_plugin` forwards over HTTP and loads no model; a `GET /v1/systemone/health` route proxies the engine's own health so a starting engine can be told apart from a crashed one. The original concern stands as the reason: loading a second Clef copy inside vLLM's API-server process would not fit beside vLLM's default 90% memory reservation, and each API-server process would load its own.
 - Metrics: cache hit rates, tokens saved, queued work, tokens per batch, p50/p95/p99.
 - Write the vLLM proposals in section 10, with our measured numbers.
 

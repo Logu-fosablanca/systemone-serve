@@ -125,8 +125,8 @@ instead of BF16. FP8 (E4M3) weights with per-token dynamic activation scaling.
 ### Why
 
 H100 has native FP8 tensor cores. For the 27B model FP8 is near-mandatory:
-BF16 weights alone take ~54 GB of the 80 GB H100, leaving only ~26 GB for state
-cache + KV cache. FP8 cuts weights to ~27 GB, freeing ~53 GB — enough for a large
+BF16 weights alone take 55 GB of the 80 GB H100, leaving only ~25 GB for state
+cache + KV cache. FP8 cuts weights to ~29 GB, freeing ~51 GB — enough for a large
 state cache that is our main advantage over vllm-jev.
 
 Published numbers from kurcontko (on the 9B Flash variant):
@@ -189,7 +189,7 @@ CLEF_FP8=1  # Load FP8 checkpoint; default 0 (BF16)
 
 | Metric | BF16 | FP8 | Improvement |
 |---|---|---|---|
-| Weight memory (27B) | ~54 GB | ~27 GB | 50% less VRAM |
+| Weight memory (27B) | 55 GB | ~29 GB | ~47% less VRAM |
 | Free for cache (H100 80GB) | ~26 GB | ~53 GB | 2x cache budget |
 | Matmul throughput | 989 TFLOPS | ~1,979 TFLOPS | ~2x |
 | End-to-end throughput | baseline | +50-80% | 1.5-1.8x |
@@ -618,7 +618,7 @@ more than saving a 9B recompute.
 |---|---|
 | Custom CUDA kernels | flash-linear-attention + FlashQLA already exist |
 | NVFP4 quantization | H100 has no FP4 tensor cores; Blackwell-only |
-| Tensor parallelism | 27B fits on one H100 in FP8 (~27 GB); TP adds communication overhead |
+| Tensor parallelism | 27B fits on one H100 in FP8 (~29 GB); TP adds communication overhead |
 | Replacing our stack with vllm-jev | Pins vLLM version; loses state cache, answer cache, scheduling |
 | Speculative decoding | Clef has no decode step |
 | Request merging (different questions) | Questions attend to each other in backbone + head |
