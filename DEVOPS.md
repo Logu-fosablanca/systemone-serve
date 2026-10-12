@@ -7,17 +7,35 @@ Exposes `POST /v1/systemone`. No text generation; single forward pass per decisi
 
 ## EC2 instance requirements
 
-| | Clef-Flash 9B | Clef 27B (recommended) |
+Pick by **VRAM and compute capability first**, instance name second. Parameter counts are
+from the Hugging Face safetensors index, so the weight figures are exact.
+
+| | Clef-Flash 9B | Clef 27B |
 |---|---|---|
-| **Instance** | p3.2xlarge (V100 16GB) | p4d.xlarge / p4de.xlarge (H100 80GB) |
-| **OS** | Ubuntu 22.04 LTS | Ubuntu 22.04 LTS |
-| **VRAM** | 19 GB BF16 / 10 GB FP8 | 54 GB BF16 / **27 GB FP8** |
-| **RAM** | 32 GB | 64 GB |
+| **Weights, BF16** | 18.8 GB | 55.0 GB |
+| **Weights, FP8 backbone** | ~10 GB | ~29 GB |
+| **Minimum VRAM, BF16** | 24 GB | 80 GB |
+| **Minimum VRAM, FP8** | 24 GB (see note) | 48 GB |
+| **AWS, BF16** | g5.2xlarge (A10G 24 GB) | p4de.24xlarge (A100 80 GB) or p5 (H100 80 GB) |
+| **AWS, FP8** | g6e.xlarge (L40S 48 GB) | g6e.xlarge (L40S 48 GB) |
+| **RAM** | 32 GB | 64 GB, more with `CLEF_STATE_CACHE_OFFLOAD=1` |
 | **Storage** | 100 GB gp3 | 200 GB gp3 |
 | **CUDA** | 12.1+ | 12.4+ |
 
-> **27B + FP8 on H100:** weights occupy ~27 GB, leaving ~53 GB for the state cache.
-> The state cache is what beats vllm-jev — FP8 is near-mandatory to make it large enough.
+> **FP8 execution needs SM89+ (Ada) or SM90 (Hopper).** Ampere cards — A100, A10G, A6000,
+> A40 — have no FP8 tensor cores. An FP8 checkpoint there saves memory at best and may
+> not run at all. L40S and RTX 6000 Ada (both SM89, 48 GB) are the cheapest cards that
+> execute FP8 and hold 27B.
+>
+> **p4d and p4de are A100, not H100.** p4d.24xlarge is 8× A100 40 GB, p4de.24xlarge is
+> 8× A100 80 GB. H100 on AWS is the **p5** family. There is no `p4d.xlarge` size.
+>
+> **Clef-Flash does not fit a V100.** 18.8 GB exceeds a 16 GB card, and Volta predates
+> BF16 entirely.
+>
+> **27B + FP8 on an 80 GB card:** weights occupy ~29 GB, leaving ~50 GB for the state
+> cache. With `CLEF_STATE_CACHE_OFFLOAD=1` the cache budget moves to host RAM instead and
+> that ceiling stops mattering — see [CONCEPTS.md §19](CONCEPTS.md).
 
 ---
 

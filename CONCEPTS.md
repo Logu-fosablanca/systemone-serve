@@ -55,13 +55,25 @@ sits at token 256 or token 4096.
 ## 4. Memory-bound versus compute-bound, and why batching works
 
 Every forward pass reads **all** the model's weights out of HBM, however few tokens it
-processes. Approximate floors on an H100 at ~3 TB/s:
+processes. Parameter counts below are from the Hugging Face safetensors index
+(9,409,813,744 and 27,356,728,560), so the byte figures are exact; the times are not.
 
-| Weights | Bytes | Pure weight-read time |
-|---|---|---|
-| Clef-flash 9B, BF16 | ~19 GB | ~6 ms |
-| Clef 27B, BF16 | ~54 GB | ~18 ms |
-| Clef 27B, FP8 | ~27 GB | ~9 ms |
+| Weights | Bytes | H100 SXM5 (3.35 TB/s) | H100 PCIe (2.0 TB/s) |
+|---|---|---|---|
+| Clef-flash 9B, BF16 | 18.8 GB | ~5.6 ms | ~9.4 ms |
+| Clef 27B, BF16 | 55.0 GB | ~16 ms | ~28 ms |
+| Clef 27B, FP8 backbone | ~29 GB | ~9 ms | ~15 ms |
+
+Three caveats, because this table is easy to quote and easy to get wrong:
+
+- **The two H100 form factors differ by 68%.** SXM5 carries HBM3 at 3.35 TB/s, PCIe
+  carries HBM2e at 2.0 TB/s. Quoting one number for "an H100" is meaningless.
+- **These use peak bandwidth, so they are optimistic floors.** A real GEMM achieves
+  perhaps 70–85% of peak, and the pass also moves activations and the K/V cache.
+- **FP8 does not quantise everything.** `_apply_fp8` touches the backbone linears only;
+  embeddings, norms, the joint head and the vision components stay BF16. With a ~152k
+  vocabulary the embeddings alone are a couple of GB, which is why the figure is ~29 GB
+  rather than the 27 GB a naive one-byte-per-parameter calculation gives.
 
 A short request does not supply enough arithmetic to hide that read, so the GPU sits
 idle waiting on memory — **memory-bound**. Run eight short requests together and you read
