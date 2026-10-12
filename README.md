@@ -350,6 +350,7 @@ CUDA graphs were measured harmful on a 4 GB card — see [BENCHMARKS.md](BENCHMA
 
 ## Further reading
 
+- [CONCEPTS.md](CONCEPTS.md): the ideas the design rests on — chunk and batch invariance, prefix reuse, the snapshot tradeoff, the in-place mutation hazard
 - [BENCHMARKS.md](BENCHMARKS.md): what has actually been measured, on what, and what hasn't
 - [INFERENCE_ENGINE_PLAN.md](INFERENCE_ENGINE_PLAN.md): what a top-tier inference engine is made of, and where vLLM falls short
 - [SYSTEMONE_PERF_PLAN.md](SYSTEMONE_PERF_PLAN.md): the plan and decision rules for beating vLLM-based Clef
