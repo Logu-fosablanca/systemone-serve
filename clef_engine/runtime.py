@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import importlib.util
+import json
 import logging
 import os
 import sys
@@ -109,13 +110,36 @@ class _Fp32Head(torch.nn.Module):
         return self.head(hidden.float(), input_ids, mask, records, self._w32)
 
 
-class StateCache:
-    """Saved states, bounded by bytes; least recently used goes first."""
+_CACHE_FIELDS = ("keys", "values", "conv_states", "recurrent_states")
 
-    def __init__(self, budget_bytes: int) -> None:
+
+def _move_cache(cache: Any, device: Any) -> Any:
+    """Move a backbone cache's tensors in place. Caller owns `cache`."""
+    for layer in cache.layers:
+        for name in _CACHE_FIELDS:
+            t = getattr(layer, name, None)
+            if isinstance(t, torch.Tensor):
+                setattr(layer, name, t.to(device))
+    return cache
+
+
+class StateCache:
+    """Saved states, bounded by bytes; least recently used goes first.
+
+    With `offload`, entries live in host memory instead of VRAM. A state is tens of
+    megabytes, so a round trip over PCIe costs single-digit milliseconds against the
+    hundreds it takes to recompute a long prefill. Host RAM is also what makes a finer
+    snapshot interval affordable: the DeltaNet recurrent snapshot is a fixed size per
+    boundary, so halving the interval doubles that overhead no matter how small the
+    block is.
+    """
+
+    def __init__(self, budget_bytes: int, device: Any = None, offload: bool = False) -> None:
         self.budget = budget_bytes
         self.used = 0
         self.too_large = 0
+        self.device = device
+        self.offload = offload
         self._items: OrderedDict[str, _Saved] = OrderedDict()
 
     def __contains__(self, key: str) -> bool:
@@ -157,8 +181,23 @@ class StateCache:
         while self.used + nbytes > self.budget:
             self.used -= self._items.popitem(last=False)[1].nbytes
         # DeltaNet layers update their cache tensors in place, so store a private copy.
-        self._items[key] = _Saved(copy.deepcopy(cache), hidden, nbytes)
+        stored = copy.deepcopy(cache)
+        if self.offload:
+            stored, hidden = _move_cache(stored, "cpu"), hidden.to("cpu")
+        self._items[key] = _Saved(stored, hidden, nbytes)
         self.used += nbytes
+
+    def restore(self, saved: _Saved) -> tuple[Any, torch.Tensor]:
+        """A private copy of a saved entry, on the live device.
+
+        The copy is what makes resuming safe at all: DeltaNet writes its cache in place,
+        so handing out the stored tensors would let the first reuse corrupt them for
+        everyone after it.
+        """
+        cache = copy.deepcopy(saved.cache)
+        if not self.offload:
+            return cache, saved.hidden
+        return _move_cache(cache, self.device), saved.hidden.to(self.device)
 
 
 def load_reference(path: Path) -> Any:
@@ -244,6 +283,7 @@ class ClefRuntime:
         packed: bool = False,
         prefix_snapshot_tokens: int = 4096,
         fp32_head: bool = False,
+        offload_states: bool = False,
     ) -> None:
         self.model = model
         self.processor = processor
@@ -271,8 +311,14 @@ class ClefRuntime:
             log.info("joint head running in fp32; the padded short-batch path is unaffected "
                      "unless CLEF_PACKED=1 is also set")
         self._fp32_head = fp32_head
-        self.states = StateCache(state_cache_bytes)
+        self.states = StateCache(state_cache_bytes, device=self.device, offload=offload_states)
+        if offload_states:
+            log.info("state cache offloaded to host memory; budget %.1f GB applies to RAM, not VRAM",
+                     state_cache_bytes / 2**30)
         self.stats = {"state_hits": 0, "prefix_hits": 0, "state_misses": 0, "state_tokens_reused": 0}
+        # len(encode(questions, state="")) depends only on the questions, and a server
+        # usually serves one schema, so the second tokenisation per request is wasted.
+        self._schema_len: dict[str, int] = {}
         self.prefix_len = self._prefix_len()
         self._startup_cache: Any = None      # precomputed after warmup()
         self._startup_hidden: Any = None     # [prefix_len, d_model] fp32
@@ -320,9 +366,19 @@ class ClefRuntime:
         """Tokenize on the CPU; safe to call off the GPU thread."""
         enc = self.jsm.encode_record(self.tokenizer, request, max_length=self.max_length, processor=self.processor)
         # The schema and suffix don't depend on the state, so the same questions with an
-        # empty state tell us where the state ends.
-        empty = self.jsm.encode_record(self.tokenizer, {**request, "state": ""}, max_length=self.max_length)
-        state_end = len(enc.input_ids) - (len(empty.input_ids) - self.prefix_len)
+        # empty state tell us where the state ends. Question order changes the input, so
+        # the memo key keeps it.
+        qkey = hashlib.sha256(
+            json.dumps(request["questions"], ensure_ascii=False, separators=(",", ":")).encode()
+        ).hexdigest()
+        empty_len = self._schema_len.get(qkey)
+        if empty_len is None:
+            empty_len = len(self.jsm.encode_record(
+                self.tokenizer, {**request, "state": ""}, max_length=self.max_length).input_ids)
+            if len(self._schema_len) > 512:  # memo, not a cache: dropping it costs one encode
+                self._schema_len.clear()
+            self._schema_len[qkey] = empty_len
+        state_end = len(enc.input_ids) - (empty_len - self.prefix_len)
         long = state_end - self.prefix_len >= self.long_state_tokens
         keys = (
             _prefix_keys(enc.input_ids, self.prefix_len, state_end, self.chunk_tokens, self._snapshot_every)
@@ -380,7 +436,8 @@ class ClefRuntime:
         if job.pos == 0:
             hit, saved = self.states.longest(job.prefix_keys)
             if saved is not None:
-                job.cache, job.hidden, job.pos = copy.deepcopy(saved.cache), [saved.hidden], hit
+                cache, hidden = self.states.restore(saved)
+                job.cache, job.hidden, job.pos = cache, [hidden], hit
                 self.stats["state_hits" if hit == job.state_end else "prefix_hits"] += 1
                 self.stats["state_tokens_reused"] += hit
             else:

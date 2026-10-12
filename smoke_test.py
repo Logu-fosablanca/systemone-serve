@@ -196,6 +196,46 @@ async def _kev_engine(rt) -> dict:
     return outs[0]
 
 
+def check_chunk_invariance(rt: ClefRuntime, tol: float) -> int:
+    """Chunk size must not change the answer. Everything else here depends on it.
+
+    DeltaNet carries a recurrent state that is updated once per chunk, so the reduction
+    order follows the chunk boundaries. If a state computed in one pass disagrees with
+    the same state computed in chunks, then saving and resuming is unsound on its own
+    terms -- a resume replays a different boundary pattern than the request that wrote
+    the entry, so the two can never be made to agree.
+
+    vllm-jev documents exactly this symptom: probabilities that "vary with batching /
+    cache state". This is the test that says whether we have it too.
+    """
+    record = RECORDS[2]
+    ref = rt.jsm.systemone(rt.model, rt.processor, {"model": "ref", **record})["answers"]
+    bad = 0
+    for chunk in (64, 128, 512, 8192):  # 8192 exceeds the state: one pass through long_step
+        rt2 = ClefRuntime(rt.model, rt.processor, rt.jsm, chunk_tokens=chunk, long_state_tokens=64)
+        job = rt2.prepare(record)
+        while (out := rt2.long_step(job)) is None:
+            pass
+        bad += compare(f"chunk={chunk}", out["answers"], ref, tol)
+    return bad
+
+
+def check_offload(rt: ClefRuntime, tol: float) -> int:
+    """An offloaded state must restore to the same answer it was saved with."""
+    rt2 = ClefRuntime(rt.model, rt.processor, rt.jsm, chunk_tokens=128,
+                      long_state_tokens=64, offload_states=True)
+    ref = rt2.jsm.systemone(rt2.model, rt2.processor, {"model": "ref", **RECORDS[3]})["answers"]
+    for record in (RECORDS[2], RECORDS[3]):  # same state, second one must hit the cache
+        job = rt2.prepare(record)
+        while (out := rt2.long_step(job)) is None:
+            pass
+    assert rt2.stats["state_hits"] == 1, f"offloaded entry was not reused: {rt2.stats}"
+    stored = next(iter(rt2.states._items.values()))
+    assert stored.hidden.device.type == "cpu", "offload did not move the entry off device"
+    print(f"offload      entry held on {stored.hidden.device.type}, restored and reused ok")
+    return compare("offload", out["answers"], ref, tol)
+
+
 def check_prefix_reuse(rt: ClefRuntime, tol: float) -> int:
     """A state that extends another must resume from the shared part, not recompute it.
 
@@ -324,6 +364,8 @@ def main() -> int:
         bad += compare(name, out["answers"], refs[i], tol)
     assert rt.stats["state_hits"] == 1 and rt.stats["state_misses"] == 1, rt.stats
 
+    bad += check_chunk_invariance(rt, tol)
+    bad += check_offload(rt, tol)
     bad += check_prefix_reuse(rt, tol)
     bad += check_batch_invariance(rt, tol)
     bad += asyncio.run(check_engine(rt, refs[0], tol))
